@@ -108,3 +108,10 @@ func (l *Ledger) GetBalance(ctx context.Context, accountID string) (storage.Acco
 func (l *Ledger) ListEntries(ctx context.Context, accountID string, limit uint32, cursor string) ([]storage.EntryView, string, error) {
 	return l.repo.ListEntries(ctx, accountID, limit, cursor)
 }
+
+// EnsureAccount возвращает счет плана счетов по бизнес-ключу, создавая его
+// детерминированно при отсутствии (ADR-2.6); используется внутренними сценариями
+// и consumer 2.7.
+func (l *Ledger) EnsureAccount(ctx context.Context, key domain.AccountKey) (storage.Account, error) {
+	return l.repo.EnsureAccount(ctx, key)
+}

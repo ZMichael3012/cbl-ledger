@@ -319,6 +319,10 @@ func mapError(err error) error {
 		return grpcmw.E(grpcmw.KindInvalidArgument, "asset_mismatch", "активы или decimals счетов различаются", nil)
 	case errors.Is(err, domain.ErrInvalidCursor):
 		return grpcmw.E(grpcmw.KindInvalidArgument, "invalid_cursor", "курсор выписки некорректен", nil)
+	case errors.Is(err, domain.ErrInvalidAccountPlan):
+		return grpcmw.E(grpcmw.KindFailedPrecondition, "invalid_account_plan", "ключ счета не соответствует плану счетов", nil)
+	case errors.Is(err, domain.ErrAccountConflict):
+		return grpcmw.E(grpcmw.KindFailedPrecondition, "account_conflict", "счет уже существует с другими параметрами", nil)
 	case errors.Is(err, domain.ErrConflict):
 		return grpcmw.E(grpcmw.KindResourceExhausted, "conflict", "конкурентный конфликт, повторите запрос", err)
 	default:

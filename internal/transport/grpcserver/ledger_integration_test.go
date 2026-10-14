@@ -31,6 +31,7 @@ import (
 	"github.com/cbl/cbl-kit/grpcmw"
 	"github.com/cbl/cbl-kit/storagex"
 
+	"github.com/cbl/cbl-ledger/internal/domain"
 	"github.com/cbl/cbl-ledger/internal/storage"
 	"github.com/cbl/cbl-ledger/internal/transport/grpcserver"
 	"github.com/cbl/cbl-ledger/internal/usecase"
@@ -79,28 +80,42 @@ func setupLedgerServer(t *testing.T) (ledgerv1.LedgerServiceClient, *gorm.DB) {
 	return ledgerv1.NewLedgerServiceClient(conn), db
 }
 
+// seedGrpcAccount провижинит счет через план счетов (CBL-2.6) и фондирует баланс:
+// bufconn-сценарии работают только со счетами штатного провижининга.
 func seedGrpcAccount(t *testing.T, db *gorm.DB, accountType, asset string, decimals int32, initial int64) storage.Account {
 	t.Helper()
-	account := storage.Account{
-		ID:        uuid.Must(uuid.NewV7()).String(),
-		Type:      accountType,
-		Asset:     asset,
-		Decimals:  decimals,
-		CreatedAt: time.Now().UTC(),
+	var key domain.AccountKey
+	switch accountType {
+	case string(domain.AccountTypeMerchant):
+		key = domain.MerchantAccountKey("grpc-"+uuid.Must(uuid.NewV7()).String(), asset, decimals)
+	case string(domain.AccountTypePayout):
+		key = domain.PayoutAccountKey("grpc-"+uuid.Must(uuid.NewV7()).String(), asset, decimals)
+	default:
+		key = domain.PlatformAccountKey(domain.AccountType(accountType), asset, decimals)
 	}
-	// Резервы доступны только счетам мерчанта со ссылкой на мерчанта: провижининг
-	// (2.6) проставляет ее; тестовый сев повторяет это соглашение.
-	if accountType == "merchant" {
-		ref := "grpc-" + account.ID
-		account.MerchantRef = &ref
+	repo := storage.NewRepository(db, zap.NewNop())
+	account, err := repo.EnsureAccount(context.Background(), key)
+	require.NoError(t, err)
+	if initial != 0 {
+		require.NoError(t, db.Model(&storage.Balance{}).
+			Where("account_id = ?", account.ID).
+			Update("available", initial).Error)
 	}
-	require.NoError(t, db.Create(&account).Error)
-	require.NoError(t, db.Create(&storage.Balance{
-		AccountID: account.ID,
-		Available: initial,
-		UpdatedAt: time.Now().UTC(),
-	}).Error)
 	return account
+}
+
+func TestIntegrationGrpcProvisionedAccountPlan(t *testing.T) {
+	client, db := setupLedgerServer(t)
+	merchant := seedGrpcAccount(t, db, "merchant", "USDT", 2, 1_000)
+	ctx := context.Background()
+
+	derived, err := domain.DeriveAccountID(domain.MerchantAccountKey(*merchant.MerchantRef, "USDT", 2))
+	require.NoError(t, err)
+	assert.Equal(t, derived.String(), merchant.ID, "getId выведен по плану счетов")
+
+	balance, err := client.GetBalance(ctx, &ledgerv1.GetBalanceRequest{AccountId: merchant.ID})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1_000), balance.GetBalance().GetAvailable().GetMinorUnits())
 }
 
 func entry(accountID string, direction commonv1.Direction, units int64) *ledgerv1.EntryInput {

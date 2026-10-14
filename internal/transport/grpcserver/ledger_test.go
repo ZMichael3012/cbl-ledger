@@ -38,6 +38,8 @@ func TestMapError(t *testing.T) {
 		{name: "reserve state", err: domain.ErrReserveState, want: grpcmw.KindFailedPrecondition},
 		{name: "reserve not allowed", err: domain.ErrReserveNotAllowed, want: grpcmw.KindFailedPrecondition},
 		{name: "invalid cursor", err: domain.ErrInvalidCursor, want: grpcmw.KindInvalidArgument},
+		{name: "invalid account plan", err: domain.ErrInvalidAccountPlan, want: grpcmw.KindFailedPrecondition},
+		{name: "account conflict", err: domain.ErrAccountConflict, want: grpcmw.KindFailedPrecondition},
 		{name: "conflict", err: domain.ErrConflict, want: grpcmw.KindResourceExhausted},
 		{name: "unknown", err: errors.New("boom"), want: grpcmw.KindInternal},
 	}

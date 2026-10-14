@@ -6,7 +6,7 @@ import "time"
 
 // Account описывает строку таблицы accounts.
 type Account struct {
-	// ID задает UUIDv7 счета.
+	// ID задает идентификатор счета: UUIDv7 или детерминированный UUIDv5 плана счетов (2.6).
 	ID string `gorm:"column:id;type:uuid;primaryKey"`
 	// Type задает тип счета плана счетов.
 	Type string `gorm:"column:type"`

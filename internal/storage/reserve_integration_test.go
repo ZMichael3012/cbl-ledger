@@ -190,6 +190,9 @@ func TestIntegrationCommitReserve(t *testing.T) {
 	var payout storage.Account
 	require.NoError(t, db.Where("type = ? AND asset = ?", "payout", "USDT").First(&payout).Error)
 	assert.Equal(t, "m-1", *payout.MerchantRef)
+	derivedPayout, err := domain.DeriveAccountID(domain.PayoutAccountKey("m-1", "USDT", 2))
+	require.NoError(t, err)
+	assert.Equal(t, derivedPayout.String(), payout.ID, "счет выплат создан по плану счетов (ADR-2.6)")
 	var payoutBalance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", payout.ID).First(&payoutBalance).Error)
 	assert.Equal(t, int64(40_000), payoutBalance.Available)

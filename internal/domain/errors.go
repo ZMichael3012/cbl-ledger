@@ -30,4 +30,8 @@ var (
 	ErrReserveNotAllowed = errors.New("ledger: reserve is not allowed for account")
 	// ErrInvalidCursor сообщает о некорректном курсоре выписки.
 	ErrInvalidCursor = errors.New("ledger: invalid cursor")
+	// ErrInvalidAccountPlan сообщает о нарушении правил плана счетов.
+	ErrInvalidAccountPlan = errors.New("ledger: invalid account plan key")
+	// ErrAccountConflict сообщает о существующем счете с другими характеристиками.
+	ErrAccountConflict = errors.New("ledger: account already exists with different parameters")
 )

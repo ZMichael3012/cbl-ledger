@@ -14,7 +14,6 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 
 	"github.com/cbl/cbl-ledger/internal/domain"
 )
@@ -238,15 +237,18 @@ func (r *Repository) commitOnce(ctx context.Context, idempotencyKey, reserveID, 
 			return errReserveStateRace
 		}
 
-		destination, err := ensureAccount(tx, string(domain.AccountTypePayout), source.Asset, source.Decimals, source.MerchantRef)
+		payoutRef := ""
+		if source.MerchantRef != nil {
+			payoutRef = *source.MerchantRef
+		}
+		destination, err := ensureAccountTx(tx, domain.PayoutAccountKey(payoutRef, source.Asset, source.Decimals))
+		if errors.Is(err, domain.ErrAccountConflict) {
+			// Существующий счет выплат с другой шкалой - расхождение активов
+			// в терминах 2.4, а не конфликт провижининга.
+			return fmt.Errorf("%w: payout account decimals mismatch: %w", domain.ErrAssetMismatch, err)
+		}
 		if err != nil {
 			return err
-		}
-		// Существующий счет выплат мог быть создан с другой шкалой: молча смешивать
-		// единицы нельзя, как и в PostTransaction.
-		if destination.Decimals != source.Decimals {
-			return fmt.Errorf("%w: payout account %s decimals %d vs source %d",
-				domain.ErrAssetMismatch, destination.ID, destination.Decimals, source.Decimals)
 		}
 		destinationBalance, err := loadBalance(tx, destination.ID)
 		if err != nil {
@@ -569,48 +571,6 @@ func loadBalance(tx *gorm.DB, accountID string) (Balance, error) {
 		return Balance{}, fmt.Errorf("storage: load balance %s: %w", accountID, err)
 	}
 	return balance, nil
-}
-
-// ensureAccount возвращает счет по типу, активу и ссылке мерчанта, создавая его
-// идемпотентно при отсутствии; ON CONFLICT закрывает гонку параллельных создателей.
-func ensureAccount(tx *gorm.DB, accountType, asset string, decimals int32, merchantRef *string) (Account, error) {
-	lookup := func() (Account, error) {
-		var account Account
-		err := tx.Where("type = ? AND asset = ? AND COALESCE(merchant_ref, '') = COALESCE(?, '')",
-			accountType, asset, merchantRef).First(&account).Error
-		return account, err
-	}
-	account, err := lookup()
-	if err == nil {
-		return account, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return Account{}, fmt.Errorf("storage: load %s account: %w", accountType, err)
-	}
-	accountID, err := uuid.NewV7()
-	if err != nil {
-		return Account{}, fmt.Errorf("storage: generate account id: %w", err)
-	}
-	account = Account{
-		ID:          accountID.String(),
-		Type:        accountType,
-		Asset:       asset,
-		Decimals:    decimals,
-		MerchantRef: merchantRef,
-		CreatedAt:   time.Now().UTC(),
-	}
-	if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&account).Error; err != nil {
-		return Account{}, fmt.Errorf("storage: insert %s account: %w", accountType, err)
-	}
-	account, err = lookup()
-	if err != nil {
-		return Account{}, fmt.Errorf("storage: load %s account after insert: %w", accountType, err)
-	}
-	balance := Balance{AccountID: account.ID, UpdatedAt: time.Now().UTC()}
-	if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&balance).Error; err != nil {
-		return Account{}, fmt.Errorf("storage: insert balance for account %s: %w", account.ID, err)
-	}
-	return account, nil
 }
 
 // reserveRequestHash вычисляет канонический хэш тела запроса резерва.

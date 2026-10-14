@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"gorm.io/driver/postgres"
@@ -24,6 +25,7 @@ import (
 	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
 	ledgerv1 "github.com/cbl/cbl-protos/gen/go/billing/ledger/v1"
 
+	"github.com/cbl/cbl-ledger/internal/domain"
 	"github.com/cbl/cbl-ledger/internal/storage"
 )
 
@@ -54,25 +56,33 @@ func openLedgerClient(t *testing.T) ledgerv1.LedgerServiceClient {
 	return ledgerv1.NewLedgerServiceClient(conn)
 }
 
-// seedE2EAccount создает счет с балансом для сценария.
-func seedE2EAccount(t *testing.T, db *gorm.DB, accountType string, initial int64) storage.Account {
+// seedE2EAccount провижинит счет плана счетов через сервисное хранилище (ADR-2.6):
+// ensureE2EAccount провижинит счет плана счетов штатным путем (ADR-2.6):
+// SQL-сев счетов заменен, идентификатор выводится детерминированно.
+func ensureE2EAccount(t *testing.T, db *gorm.DB, key domain.AccountKey) storage.Account {
 	t.Helper()
-	merchantRef := "e2e-" + uuid.Must(uuid.NewV7()).String()
-	account := storage.Account{
-		ID:          uuid.Must(uuid.NewV7()).String(),
-		Type:        accountType,
-		Asset:       "USDT",
-		Decimals:    2,
-		MerchantRef: &merchantRef,
-		CreatedAt:   time.Now().UTC(),
-	}
-	require.NoError(t, db.Create(&account).Error)
-	require.NoError(t, db.Create(&storage.Balance{
-		AccountID: account.ID,
-		Available: initial,
-		UpdatedAt: time.Now().UTC(),
-	}).Error)
+	repo := storage.NewRepository(db, zap.NewNop())
+	account, err := repo.EnsureAccount(context.Background(), key)
+	require.NoError(t, err)
 	return account
+}
+
+// fundE2EAccount пополняет счет реальной проводкой Dr clearing / Cr account
+// (транзитный clearing может уходить в минус, T-LED-03); SQL-фондирование не нужно.
+func fundE2EAccount(t *testing.T, db *gorm.DB, client ledgerv1.LedgerServiceClient, accountID string, amount int64) {
+	t.Helper()
+	clearing := ensureE2EAccount(t, db, domain.PlatformAccountKey(domain.AccountTypeClearing, "USDT", 2))
+	refID := "funding-" + uuid.Must(uuid.NewV7()).String()
+	_, err := client.PostTransaction(context.Background(), &ledgerv1.PostTransactionRequest{
+		IdempotencyKey: refID + ":funding",
+		RefType:        "funding",
+		RefId:          refID,
+		Entries: []*ledgerv1.EntryInput{
+			{AccountId: clearing.ID, Direction: commonv1.Direction_DIRECTION_DEBIT, Amount: money(amount)},
+			{AccountId: accountID, Direction: commonv1.Direction_DIRECTION_CREDIT, Amount: money(amount)},
+		},
+	})
+	require.NoError(t, err, "пополнение счета через проводку")
 }
 
 // money собирает сумму актива сценария.
@@ -86,7 +96,12 @@ func TestReserveCommitAndReleaseFlow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	merchant := seedE2EAccount(t, db, "merchant", 100_000)
+	merchantRef := "e2e-" + uuid.Must(uuid.NewV7()).String()
+	merchant := ensureE2EAccount(t, db, domain.MerchantAccountKey(merchantRef, "USDT", 2))
+	derived, err := domain.DeriveAccountID(domain.MerchantAccountKey(merchantRef, "USDT", 2))
+	require.NoError(t, err)
+	assert.Equal(t, derived.String(), merchant.ID, "id мерчантского счета выведен по плану счетов")
+	fundE2EAccount(t, db, client, merchant.ID, 100_000)
 	refID := "payout-" + uuid.Must(uuid.NewV7()).String()
 
 	// Удержание: available -> reserved.
@@ -176,8 +191,10 @@ func TestBalanceAndEntriesFlow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	merchant := seedE2EAccount(t, db, "merchant", 50_000)
-	fee := seedE2EAccount(t, db, "fee", 0)
+	merchantRef := "e2e-" + uuid.Must(uuid.NewV7()).String()
+	merchant := ensureE2EAccount(t, db, domain.MerchantAccountKey(merchantRef, "USDT", 2))
+	fee := ensureE2EAccount(t, db, domain.PlatformAccountKey(domain.AccountTypeFee, "USDT", 2))
+	fundE2EAccount(t, db, client, merchant.ID, 50_000)
 	refID := "pay-" + uuid.Must(uuid.NewV7()).String()
 
 	posted, err := client.PostTransaction(ctx, &ledgerv1.PostTransactionRequest{
@@ -227,21 +244,28 @@ func TestBalanceAndEntriesFlow(t *testing.T) {
 		}
 	}
 
-	// Выписка: две проводки по счету, курсорная пагинация по одной записи.
-	page, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{AccountId: merchant.ID, Limit: 1})
-	require.NoError(t, err)
-	require.Len(t, page.GetEntries(), 1)
-	assert.NotEmpty(t, page.GetNextCursor())
-	assert.Equal(t, commonv1.Direction_DIRECTION_DEBIT, page.GetEntries()[0].GetDirection())
-	assert.Equal(t, "payment", page.GetEntries()[0].GetRefType())
-
-	tail, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{
-		AccountId: merchant.ID,
-		Limit:     1,
-		Cursor:    page.GetNextCursor(),
-	})
-	require.NoError(t, err)
-	require.Len(t, tail.GetEntries(), 1)
-	assert.Empty(t, tail.GetNextCursor())
-	assert.Greater(t, tail.GetEntries()[0].GetEntryId(), page.GetEntries()[0].GetEntryId())
+	// Выписка: пополнение и две проводки, курсорная пагинация по две записи.
+	var listed []*ledgerv1.Entry
+	cursor := ""
+	for {
+		page, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{
+			AccountId: merchant.ID,
+			Limit:     2,
+			Cursor:    cursor,
+		})
+		require.NoError(t, err)
+		listed = append(listed, page.GetEntries()...)
+		cursor = page.GetNextCursor()
+		if cursor == "" {
+			break
+		}
+	}
+	require.Len(t, listed, 3, "пополнение и две оплаты")
+	assert.Equal(t, "funding", listed[0].GetRefType())
+	assert.Equal(t, commonv1.Direction_DIRECTION_CREDIT, listed[0].GetDirection())
+	assert.Equal(t, int64(50_000), listed[0].GetAmount().GetMinorUnits())
+	assert.Equal(t, "payment", listed[1].GetRefType())
+	assert.Equal(t, commonv1.Direction_DIRECTION_DEBIT, listed[1].GetDirection())
+	assert.Greater(t, listed[1].GetEntryId(), listed[0].GetEntryId())
+	assert.Equal(t, "payment", listed[2].GetRefType())
 }
