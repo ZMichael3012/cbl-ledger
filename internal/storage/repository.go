@@ -182,6 +182,7 @@ type Repository struct {
 	log           *zap.Logger
 	retryPolicy   RetryPolicy
 	retryObserver RetryObserver
+	eventSink     TxnEventSink
 }
 
 // NewRepository создает Repository; опции настраивают политику и наблюдателя повторов.
@@ -383,6 +384,30 @@ func (r *Repository) postOnce(ctx context.Context, idempotencyKey, refType, refI
 		}
 		if err := tx.Create(&snapshotRows).Error; err != nil {
 			return fmt.Errorf("storage: insert transaction balances: %w", err)
+		}
+		// Событие пишется в ту же транзакцию: публикация через outbox атомарна
+		// с проводкой (CBL-000, инвариант 6).
+		eventEntries := make([]TxnEventEntry, 0, len(entries))
+		for i := range entries {
+			account := accounts[entries[i].AccountID]
+			eventEntries = append(eventEntries, TxnEventEntry{
+				AccountID: entries[i].AccountID,
+				Direction: entries[i].Direction,
+				Amount:    entries[i].Amount,
+				Asset:     account.Asset,
+				Decimals:  account.Decimals,
+			})
+		}
+		if err := r.emitEvent(ctx, tx, TxnEvent{
+			Type:          EventTransactionPosted,
+			TransactionID: transaction.ID,
+			RefType:       refType,
+			RefID:         refID,
+			OccurredAt:    transaction.CreatedAt,
+			Key:           accountIDs[0],
+			Entries:       eventEntries,
+		}); err != nil {
+			return err
 		}
 		result = PostTransactionResult{TransactionID: transaction.ID, Balances: snapshots}
 		return nil

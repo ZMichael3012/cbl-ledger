@@ -37,11 +37,19 @@ try {
     $logsText = ($logs | Out-String)
     if ($logsText -notmatch "successfully migrated database to version: 8") { throw "migrations to version 8 did not apply" }
     if ($logsText -match "apply migrations failed") { throw "migrations failed" }
+    if ($logsText -notmatch "payment consumer started") { throw "payment consumer did not start" }
+
+    # Топики создает kafka-init; проверяем каталог топиков стенда.
+    $topics = docker compose -f $ComposeFile --profile app exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+    if ($LASTEXITCODE -ne 0) { throw "kafka topics list failed" }
+    $topicsText = ($topics | Out-String)
+    if ($topicsText -notmatch "payment.events") { throw "payment.events topic is missing" }
+    if ($topicsText -notmatch "ledger.events") { throw "ledger.events topic is missing" }
 
     go test -tags e2e -count=1 -v ./test/e2e/
     if ($LASTEXITCODE -ne 0) { throw "e2e scenario failed" }
 
-    Write-Host "OK: healthz ok, migrations applied (version 8), reserve/balance flow green"
+    Write-Host "OK: healthz ok, migrations applied (version 8), topics and payment consumer up, e2e green"
 } finally {
     docker compose -f $ComposeFile --profile app down -v | Out-Null
     Pop-Location

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +27,10 @@ import (
 
 	"github.com/cbl/cbl-kit/ginmw"
 	"github.com/cbl/cbl-kit/grpcmw"
+	"github.com/cbl/cbl-kit/inbox"
+	"github.com/cbl/cbl-kit/inbox/kafkaconsumer"
+	"github.com/cbl/cbl-kit/outbox"
+	"github.com/cbl/cbl-kit/outbox/kafkapub"
 	"github.com/cbl/cbl-kit/storagex"
 
 	"github.com/cbl/cbl-ledger/internal/storage"
@@ -77,13 +82,57 @@ func main() {
 		return
 	}
 
-	repo := storage.NewRepository(db, log, storage.WithRetryObserver(func(event storage.RetryEvent) {
-		log.Warn("ledger retry",
-			zap.Int("attempt", event.Attempt),
-			zap.String("cause", event.Cause),
-			zap.Duration("delay", event.Delay))
-	}))
+	repo := storage.NewRepository(db, log,
+		storage.WithRetryObserver(func(event storage.RetryEvent) {
+			log.Warn("ledger retry",
+				zap.Int("attempt", event.Attempt),
+				zap.String("cause", event.Cause),
+				zap.Duration("delay", event.Delay))
+		}),
+		storage.WithEventSink(usecase.NewLedgerEventSink(log)))
 	ledgerSvc := usecase.NewLedger(repo, log)
+
+	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
+		brokerList := splitCSV(brokers)
+		publisher, err := kafkapub.New(brokerList)
+		if err != nil {
+			log.Error("kafka publisher failed", zap.Error(err))
+			return
+		}
+		defer publisher.Close()
+
+		relay := outbox.NewRelay(db, publisher, log)
+		go func() {
+			if runErr := relay.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
+				log.Error("outbox relay stopped", zap.Error(runErr))
+			}
+		}()
+
+		group := getenv("KAFKA_CONSUMER_GROUP", usecase.ConsumerGroupPayments)
+		consumer := usecase.NewPaymentConsumer(ledgerSvc, log)
+		processor := inbox.NewProcessor(group, db, inbox.NewGuard(), consumer, publisher,
+			inbox.NewRouter(usecase.TopicPaymentEvents, 3), log)
+		topics := []string{
+			usecase.TopicPaymentEvents,
+			usecase.TopicPaymentEvents + inbox.RetrySuffix5s,
+			usecase.TopicPaymentEvents + inbox.RetrySuffix1m,
+			usecase.TopicPaymentEvents + inbox.RetrySuffix10m,
+		}
+		runner, runErr := kafkaconsumer.New(brokerList, group, topics, processor, log)
+		if runErr != nil {
+			log.Error("payment consumer failed", zap.Error(runErr))
+			return
+		}
+		defer runner.Close()
+		go func() {
+			if consumeErr := runner.Run(ctx); consumeErr != nil && !errors.Is(consumeErr, context.Canceled) {
+				log.Error("payment consumer stopped", zap.Error(consumeErr))
+			}
+		}()
+		log.Info("payment consumer started", zap.String("group", group))
+	} else {
+		log.Warn("KAFKA_BROKERS is empty: payment consumer disabled")
+	}
 
 	httpAddr := getenv("HTTP_ADDR", ":8040")
 	grpcAddr := getenv("GRPC_ADDR", ":9040")
@@ -180,4 +229,17 @@ func getenvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// splitCSV разбирает список значений из переменной окружения через запятую,
+// отбрасывая пустые элементы и пробелы вокруг них.
+func splitCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	return values
 }

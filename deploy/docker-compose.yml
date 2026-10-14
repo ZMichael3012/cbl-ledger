@@ -59,6 +59,18 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
+  kafka-init:
+    image: apache/kafka:3.7.0
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for topic in payment.events payment.events.retry.5s payment.events.retry.1m payment.events.retry.10m payment.events.dlq ledger.events; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic "$$topic" --partitions 1 --replication-factor 1
+        done
+    networks: [cbl-net]
+
   ledger:
     profiles: ["app"]
     build:
@@ -70,6 +82,7 @@ services:
       METRICS_ADDR: ":9240"
       PG_DSN: postgres://cbl:cbl@postgres:5432/ledger?sslmode=disable
       KAFKA_BROKERS: kafka:29092
+      KAFKA_CONSUMER_GROUP: cbl-ledger-payments
     ports:
       - "8040:8040"
       - "9040:9040"
@@ -77,6 +90,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
     networks: [cbl-net]
 
 volumes:

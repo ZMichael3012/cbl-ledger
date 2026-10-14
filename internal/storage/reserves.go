@@ -153,6 +153,15 @@ func (r *Repository) reserveOnce(ctx context.Context, input ReserveInput, hash s
 			}
 			return fmt.Errorf("storage: insert reserve: %w", err)
 		}
+		if err := r.emitEvent(ctx, tx, TxnEvent{
+			Type:       EventReserveCreated,
+			RefType:    reserveRefType,
+			RefID:      reserve.RefID,
+			OccurredAt: reserve.CreatedAt,
+			Key:        reserve.AccountID,
+		}); err != nil {
+			return err
+		}
 		result = ReserveResult{ReserveID: reserve.ID, Status: domain.ReserveStatusActive}
 		return nil
 	})
@@ -342,6 +351,20 @@ func (r *Repository) commitOnce(ctx context.Context, idempotencyKey, reserveID, 
 		if err := recordReserveOperation(tx, reserve.ID, reserveOpCommit, idempotencyKey, hash); err != nil {
 			return err
 		}
+		if err := r.emitEvent(ctx, tx, TxnEvent{
+			Type:          EventReserveCommitted,
+			TransactionID: transaction.ID,
+			RefType:       reserveRefType,
+			RefID:         reserve.RefID,
+			OccurredAt:    now,
+			Key:           source.ID,
+			Entries: []TxnEventEntry{
+				{AccountID: source.ID, Direction: domain.DirectionDebit, Amount: reserve.Amount, Asset: source.Asset, Decimals: source.Decimals},
+				{AccountID: destination.ID, Direction: domain.DirectionCredit, Amount: reserve.Amount, Asset: destination.Asset, Decimals: destination.Decimals},
+			},
+		}); err != nil {
+			return err
+		}
 		result = ReserveResult{ReserveID: reserve.ID, Status: domain.ReserveStatusCommitted}
 		return nil
 	})
@@ -447,6 +470,15 @@ func (r *Repository) releaseOnce(ctx context.Context, idempotencyKey, reserveID,
 		}
 
 		if err := recordReserveOperation(tx, reserve.ID, reserveOpRelease, idempotencyKey, hash); err != nil {
+			return err
+		}
+		if err := r.emitEvent(ctx, tx, TxnEvent{
+			Type:       EventReserveReleased,
+			RefType:    reserveRefType,
+			RefID:      reserve.RefID,
+			OccurredAt: now,
+			Key:        reserve.AccountID,
+		}); err != nil {
 			return err
 		}
 		result = ReserveResult{ReserveID: reserve.ID, Status: domain.ReserveStatusReleased}

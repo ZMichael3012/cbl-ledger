@@ -18,8 +18,10 @@ Out of scope: другие сервисы платформы; взаимодей
 - REST: административный /healthz, /readyz
 - gRPC: сервер LedgerService (PostTransaction, Reserve, CommitReserve, ReleaseReserve,
   GetBalance, ListEntries)
-- Kafka продюсирует: ledger.events
-- Kafka потребляет: payment.events
+- Kafka продюсирует: `ledger.events` (transaction.posted, reserve.created/committed/released;
+  конверты через outbox, ключ - первая проводка по сортировке; CBL-003 раздел 6)
+- Kafka потребляет: `payment.events` (payment.completed -> Dr clearing / Cr merchant / Cr fee;
+  группа `cbl-ledger-payments`, retry-топики и DLQ механикой kit)
 - Хранилище: PostgreSQL ledger (accounts, transactions, entries, balances, reserves,
   reserve_operations, transaction_balances, outbox, inbox)
 - План счетов (2.6): `account_id` выводится детерминированно из бизнес-ключа
@@ -39,8 +41,8 @@ goose, zap). `AutoMigrate` запрещен, миграции только goose
 make build        # go build ./...
 make test         # go test ./...
 make test-integration  # integration (testcontainers)
-make test-e2e     # сквозной сценарий резервов против поднятого compose-стенда (CBL-2.4)
-make smoke        # compose-стенд: сборка, миграции до версии 8, e2e-сценарии резервов и выписки
+make test-e2e     # сквозные сценарии резервов, выписки и consumer (Kafka+PG на testcontainers)
+make smoke        # compose-стенд: сборка, миграции до версии 8, топики, consumer, e2e
 make bench        # бенчмарки записи на testcontainers (CBL-2.9)
 make vet          # go vet ./...
 make lint         # golangci-lint в Docker
@@ -55,7 +57,8 @@ make down         # docker compose -f deploy/docker-compose.yml down -v
 
 HTTP `8040`, gRPC `9040`, метрики `9240`.
 Переменные (применимые к сервису): `HTTP_ADDR`, `GRPC_ADDR`, `METRICS_ADDR`, `PG_DSN`,
-`KAFKA_BROKERS`, `SCHEMA_REGISTRY_URL`, `REDIS_ADDR`, `DB_MAX_OPEN_CONNS` (по умолчанию 20),
+`KAFKA_BROKERS`, `KAFKA_CONSUMER_GROUP` (по умолчанию `cbl-ledger-payments`),
+`SCHEMA_REGISTRY_URL`, `REDIS_ADDR`, `DB_MAX_OPEN_CONNS` (по умолчанию 20),
 `DB_MAX_IDLE_CONNS` (по умолчанию 10).
 
 ## 6. Правила разработки
@@ -86,19 +89,22 @@ consumer lag; дашборды после задачи 0.7.
 | T-LED-05 | Горячий счет остается на оптимистичном CAS до порога 200 записей/с | простая модель, нет блокировок строк на общих путях | при 24 писателях в один счет пропускная способность падает (168 записей/с, 14% отказов) | план защиты по порогу: сокращение операторов, батчевый коммиттер, шардирование счета (2.9, раздел 3.2) |
 | T-LED-06 | Резерв - удержание: Reserve/Release меняют только available/reserved без проводок, Commit пишет сбалансированную пару Dr источник / Cr счет выплат | удержание не создает фиктивного движения в журнале, компенсация дешева (release) | балансы не выводятся из одних entries, нужен учет reserves (CBL-000, раздел 6); получатель коммита не в контракте CF-1 | получатель - счет выплат того же merchant_ref и актива (ADR-2.4, спека 2.4); события reserve.* - в 2.7; fail-closed для счетов мерчанта без merchant_ref |
 | T-LED-07 | Правила плана счетов (2.6) обеспечиваются валидацией и единственным провижининг-путем, без CHECK-ограничений БД | миграция не ломает уже примененные dev-стенды с legacy-счетами | прямой SQL может создать off-plan счет (lowercase asset, ref у платформенного типа) | денежные инварианты не затрагиваются (резервы fail-closed по типу/ref/asset, проводки сбалансированы); лечение балансов ограничено счетами без проводок |
+| T-LED-08 | Handler consumer (2.7) не использует транзакцию Guard: проводка идемпотентна по бизнес-ключу `payment:{id}:completed`, inbox - второй барьер | нет пересмотра retry-контура 2.3; один компактный commit на событие | сбой между коммитами проводки и inbox безопасен (replay), но требует канонизации `payment_id` (реализовано) | конкурентные дубли подтверждены integration-тестом; события пишутся в outbox атомарно с проводкой |
+| T-LED-09 | Ключ партиции `ledger.events` - лексикографически минимальный account_id проводки | стабильная партиция события, дедуп по event_id в заголовке | события одного счета могут попасть в разные партиции (порядок не обещан); min-ключ тянет долю событий к платформенным счетам (clearing/fee) | потребители коррелируют по `ref_id`/`transaction_id`, а не по порядку; при необходимости ключ пересматривается в CF-2 |
 
 ## 9. Known issues
 
 | ID | Проблема | Влияние | План | Статус |
 | :-- | :-- | :-- | :-- | :-- |
 | KI-ledger-01 | CI и pre-commit не настроены | линтеры запускаются вручную | задача 0.2 | open |
-| KI-ledger-02 | Нет mTLS и authN на gRPC LedgerService: запись, резервы, чтение балансов и полной выписки (с ref_id) любого счета; `account_id` выводится из публичных бизнес-ключей (2.6), т.е. не является capability | порт 9040 не публиковать за пределы доверенной сети; prod-выкладка запрещена; авторизацию привязывать к мерчанту, а не к знанию id | mTLS и авторизация до prod (0.6, 1.4); неймспейсинг ключей идемпотентности по мерчанту - вместе с authN (оракул глобального ключа) | open |
+| KI-ledger-02 | Нет mTLS и authN на gRPC LedgerService: запись, резервы, чтение балансов и полной выписки (с ref_id) любого счета; `account_id` выводится из публичных бизнес-ключей (2.6), т.е. не является capability; эквивалентный неаутентифицированный путь записи появился через Kafka: запись `payment.completed` в `payment.events` создает счета и кредит произвольного `merchant_id` | порт 9040 и Kafka-топики не публиковать за пределы доверенной сети; prod-выкладка запрещена; авторизацию привязывать к мерчанту, а не к знанию id | mTLS и авторизация до prod (0.6, 1.4); broker ACL/mTLS на запись в `payment.events` - задача 0.5; неймспейсинг ключей идемпотентности по мерчанту - вместе с authN | open |
 | KI-ledger-03 | Сценарии e2e в `test/e2e/` отсутствуют | шаг 8 выполнен частично: integration, smoke compose и k6-нагрузка (2.9, `test/load/`) есть; сценариев e2e нет | ЗАКРЫТ 14.10.2026: e2e compose-сценарий резервов `test/e2e/reserve_flow.ps1` + `make smoke` (Reserve/Commit/Release через реальный gRPC и PostgreSQL) | closed |
 | KI-ledger-04 | Race detector недоступен локально (нет CGO на Windows) | конкурентные тесты идут без -race | включить -race в CI (0.2) | open |
 | KI-ledger-05 | Функция `balances_non_negative()` (миграция 00005) не фиксирует `search_path` | низкое: подмена требует прав CREATE в схеме раньше public; 00006 захардена (`public.entries`, search_path) | применить hardening отдельной миграцией при плановом изменении 00005 | open |
 | KI-ledger-06 | Нет серверного deadline-интерцептора и ограничения очереди RPC: при насыщении пула запрос без клиентского дедлайна может ждать долго | availability-риск вне денежного контура; нагрузка 2.9 деградирует ростом латентности, не ошибками | timeout-интерцептор и MaxConcurrentStreams до prod (0.6/14.4); prod запрещен KI-ledger-02 | open |
 | KI-ledger-07 | `transaction_balances` растет примерно 1:1 к `entries` (строка на затронутый счет), ретеншен и партиционирование не заданы | рост БД, удорожание бэкапов; чтения по PK от роста не страдают | партиционирование/ретеншен вместе с `entries` - задача 14.2; `created_at` уже пишется (2.5) | open |
 | KI-ledger-08 | Вывод `account_id` (UUIDv5 плана счетов) реализован в `internal/domain` леджера; потребители (Billing API 7.4, Payout 10.2) будут воспроизводить алгоритм по golden-векторам (CBL-003, раздел 9) | риск дрейфа реализаций между сервисами | перенести вывод в общую библиотеку `cbl-kit` до старта 7.4/10.2; до этого векторы обязательны в тестах каждого потребителя | open |
+| KI-ledger-09 | Outbox леджера растет на каждую мутацию (проводки, резервы) и не чистится: relay только проставляет `published_at` | рост БД и бэкапов; замер 2.9 не включал insert outbox-строк | ретеншен/архивация published-строк вместе с партиционированием `entries` - задача 14.2; перемер пропускной способности там же | open |
 
 ## 10. Журнал задач
 
@@ -110,7 +116,8 @@ consumer lag; дашборды после задачи 0.7.
 | CBL-2.9 | 2026-10-14 | done, ревью закрыто (бенчмарки, k6 500/1000 rps, потолок пула БД, стратегия в ADR-2.9) | `.specs/CBL-2.9-benchmark-sharding.md` | b663447 |
 | CBL-2.4 | 2026-10-14 | done, ревью закрыто (резервы с конечным автоматом, миграция 00007, e2e compose, покрытие 86.6%) | `.specs/CBL-2.4-reserves.md` | f3d4b9e |
 | CBL-2.5 | 2026-10-14 | done, ревью закрыто (GetBalance/ListEntries, миграция 00008, снимки balances_after, покрытие 87.3%) | `.specs/CBL-2.5-balance-queries.md` | 19ff6f5 |
-| CBL-2.6 | 2026-10-14 | done, ревью закрыто (детерминированные счета, EnsureAccount, golden-векторы, покрытие 87.6%) | `.specs/CBL-2.6-account-plan.md` | этот коммит |
+| CBL-2.6 | 2026-10-14 | done, ревью закрыто (детерминированные счета, EnsureAccount, golden-векторы, покрытие 87.6%) | `.specs/CBL-2.6-account-plan.md` | df71640 |
+| CBL-2.7 | 2026-10-14 | done, ревью закрыто (consumer payment.completed, ledger.events через outbox, kit-фикс DLQ, покрытие 87.3%) | `.specs/CBL-2.7-payment-consumer.md` | этот коммит |
 
 ## 11. Runbook
 
@@ -139,3 +146,14 @@ Kafka consumer group и outbox lag, при необходимости перез
    грязные legacy-данные или баг потребителя; сверить с golden-векторами (CBL-003, раздел 9).
 3. Расхождение выведенного потребителем `account_id` с леджером: сверить реализацию с
    векторами; перенос вывода в `cbl-kit` - KI-ledger-08.
+
+Consumer платежей и события (2.7):
+
+1. `payment.events.dlq`: причина в заголовке `x-error`; типовые причины - невалидное событие
+   (payment_id/актив/суммы), повтор completed с измененным телом (`idempotency_key_reuse`);
+   корректировка ошибочной проводки - только сторно (10.x), не повтор события.
+2. Лаг consumer: метрики/логи `payment completed posted` (replay - `payment completed
+   replayed`); при застое проверить DLQ и `x-original-event-id` (kit санитизирует битые
+   event_id с фикса CBL-1.3).
+3. Outbox lag: логи relay kit; неопубликованные строки лежат в таблице `outbox`
+   (ретеншен - KI-ledger-09, 14.2); потери нет, возможны дубли (at-least-once).
