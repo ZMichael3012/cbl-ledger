@@ -78,6 +78,23 @@ type Balance struct {
 // TableName задает имя таблицы balances.
 func (Balance) TableName() string { return "balances" }
 
+// TransactionBalance описывает снимок баланса счета после проводки.
+type TransactionBalance struct {
+	// TransactionID задает транзакцию снимка.
+	TransactionID string `gorm:"column:transaction_id;type:uuid;primaryKey"`
+	// AccountID задает счет снимка.
+	AccountID string `gorm:"column:account_id;type:uuid;primaryKey"`
+	// Available задает доступный остаток после проводки.
+	Available int64 `gorm:"column:available"`
+	// Reserved задает зарезервированный остаток после проводки.
+	Reserved int64 `gorm:"column:reserved"`
+	// CreatedAt задает время снимка (для будущего партиционирования и ретеншена).
+	CreatedAt time.Time `gorm:"column:created_at"`
+}
+
+// TableName задает имя таблицы transaction_balances.
+func (TransactionBalance) TableName() string { return "transaction_balances" }
+
 // Reserve описывает строку таблицы reserves: удержание средств под внешнюю операцию.
 type Reserve struct {
 	// ID задает UUIDv7 резерва.

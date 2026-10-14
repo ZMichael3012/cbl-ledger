@@ -28,4 +28,6 @@ var (
 	ErrReserveState = errors.New("ledger: reserve in invalid state")
 	// ErrReserveNotAllowed сообщает, что тип счета не поддерживает резервирование.
 	ErrReserveNotAllowed = errors.New("ledger: reserve is not allowed for account")
+	// ErrInvalidCursor сообщает о некорректном курсоре выписки.
+	ErrInvalidCursor = errors.New("ledger: invalid cursor")
 )

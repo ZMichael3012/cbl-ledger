@@ -37,6 +37,7 @@ func TestMapError(t *testing.T) {
 		{name: "unknown reserve", err: domain.ErrUnknownReserve, want: grpcmw.KindNotFound},
 		{name: "reserve state", err: domain.ErrReserveState, want: grpcmw.KindFailedPrecondition},
 		{name: "reserve not allowed", err: domain.ErrReserveNotAllowed, want: grpcmw.KindFailedPrecondition},
+		{name: "invalid cursor", err: domain.ErrInvalidCursor, want: grpcmw.KindInvalidArgument},
 		{name: "conflict", err: domain.ErrConflict, want: grpcmw.KindResourceExhausted},
 		{name: "unknown", err: errors.New("boom"), want: grpcmw.KindInternal},
 	}
@@ -184,6 +185,48 @@ func TestMapReserveStatus(t *testing.T) {
 	assert.Equal(t, ledgerv1.ReserveStatus_RESERVE_STATUS_COMMITTED, mapReserveStatus(domain.ReserveStatusCommitted))
 	assert.Equal(t, ledgerv1.ReserveStatus_RESERVE_STATUS_RELEASED, mapReserveStatus(domain.ReserveStatusReleased))
 	assert.Equal(t, ledgerv1.ReserveStatus_RESERVE_STATUS_UNSPECIFIED, mapReserveStatus(domain.ReserveStatus("unknown")))
+}
+
+func TestGetBalanceValidation(t *testing.T) {
+	t.Parallel()
+
+	server := NewLedger(nil)
+	ctx := context.Background()
+
+	_, err := server.GetBalance(ctx, &ledgerv1.GetBalanceRequest{AccountId: "not-a-uuid"})
+	require.Error(t, err)
+	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
+
+	_, err = server.GetBalance(ctx, &ledgerv1.GetBalanceRequest{})
+	require.Error(t, err)
+	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
+}
+
+func TestListEntriesValidation(t *testing.T) {
+	t.Parallel()
+
+	server := NewLedger(nil)
+	ctx := context.Background()
+	accountID := uuid.Must(uuid.NewV7()).String()
+
+	_, err := server.ListEntries(ctx, &ledgerv1.ListEntriesRequest{AccountId: "nope"})
+	require.Error(t, err)
+	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
+
+	_, err = server.ListEntries(ctx, &ledgerv1.ListEntriesRequest{
+		AccountId: accountID,
+		Cursor:    strings.Repeat("c", maxCursorLen+1),
+	})
+	require.Error(t, err)
+	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
+}
+
+func TestDirectionToProto(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, commonv1.Direction_DIRECTION_DEBIT, directionToProto(domain.DirectionDebit))
+	assert.Equal(t, commonv1.Direction_DIRECTION_CREDIT, directionToProto(domain.DirectionCredit))
+	assert.Equal(t, commonv1.Direction_DIRECTION_UNSPECIFIED, directionToProto(domain.Direction("unknown")))
 }
 
 func TestPostTransactionValidation(t *testing.T) {

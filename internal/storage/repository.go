@@ -321,6 +321,26 @@ func (r *Repository) postOnce(ctx context.Context, idempotencyKey, refType, refI
 			}
 		}
 
+		// Балансы обновляются до вставки проводок и в детерминированном порядке:
+		// CAS удерживает блокировку строки до коммита, поэтому идентификаторы
+		// проводок выписываются в порядке коммитов по счету (курсорная пагинация
+		// 2.5 не пропускает записи), а встречные транзакции двух счетов не дают
+		// deadlock 40P01.
+		accountIDs := make([]string, 0, len(deltas))
+		for accountID := range deltas {
+			accountIDs = append(accountIDs, accountID)
+		}
+		sort.Strings(accountIDs)
+
+		snapshots := make([]BalanceSnapshot, 0, len(accountIDs))
+		for _, accountID := range accountIDs {
+			snapshot, err := applyDelta(tx, accounts[accountID], deltas[accountID])
+			if err != nil {
+				return err
+			}
+			snapshots = append(snapshots, snapshot)
+		}
+
 		transaction := Transaction{
 			ID:             txID.String(),
 			IdempotencyKey: idempotencyKey,
@@ -349,21 +369,20 @@ func (r *Repository) postOnce(ctx context.Context, idempotencyKey, refType, refI
 			}
 		}
 
-		// Счета обновляются в детерминированном порядке: иначе встречные транзакции
-		// двух счетов могут дать deadlock 40P01.
-		accountIDs := make([]string, 0, len(deltas))
-		for accountID := range deltas {
-			accountIDs = append(accountIDs, accountID)
+		// Снимок балансов пишется вместе с проводкой: повтор по ключу обязан
+		// вернуть balances_after на момент первой проводки (CBL-2.5).
+		snapshotRows := make([]TransactionBalance, 0, len(snapshots))
+		for _, snapshot := range snapshots {
+			snapshotRows = append(snapshotRows, TransactionBalance{
+				TransactionID: transaction.ID,
+				AccountID:     snapshot.AccountID,
+				Available:     snapshot.Available,
+				Reserved:      snapshot.Reserved,
+				CreatedAt:     transaction.CreatedAt,
+			})
 		}
-		sort.Strings(accountIDs)
-
-		snapshots := make([]BalanceSnapshot, 0, len(accountIDs))
-		for _, accountID := range accountIDs {
-			snapshot, err := applyDelta(tx, accounts[accountID], deltas[accountID])
-			if err != nil {
-				return err
-			}
-			snapshots = append(snapshots, snapshot)
+		if err := tx.Create(&snapshotRows).Error; err != nil {
+			return fmt.Errorf("storage: insert transaction balances: %w", err)
 		}
 		result = PostTransactionResult{TransactionID: transaction.ID, Balances: snapshots}
 		return nil
@@ -455,7 +474,41 @@ func applyDelta(tx *gorm.DB, account *Account, delta int64) (BalanceSnapshot, er
 }
 
 // loadResult собирает результат существующей транзакции для повтора по ключу.
+// Приоритет - снимок balances_after (CBL-2.5); для транзакций до миграции 00008
+// (dev-данные) используется прежнее чтение текущих балансов.
 func loadResult(tx *gorm.DB, transaction Transaction) (PostTransactionResult, error) {
+	var snapshotRows []TransactionBalance
+	if err := tx.Where("transaction_id = ?", transaction.ID).Find(&snapshotRows).Error; err != nil {
+		return PostTransactionResult{}, fmt.Errorf("storage: load transaction balances: %w", err)
+	}
+	if len(snapshotRows) > 0 {
+		ids := make([]string, 0, len(snapshotRows))
+		for _, row := range snapshotRows {
+			ids = append(ids, row.AccountID)
+		}
+		var accounts []Account
+		if err := tx.Where("id IN ?", ids).Find(&accounts).Error; err != nil {
+			return PostTransactionResult{}, fmt.Errorf("storage: load accounts: %w", err)
+		}
+		accountByID := make(map[string]Account, len(accounts))
+		for _, account := range accounts {
+			accountByID[account.ID] = account
+		}
+		snapshots := make([]BalanceSnapshot, 0, len(snapshotRows))
+		for _, row := range snapshotRows {
+			account := accountByID[row.AccountID]
+			snapshots = append(snapshots, BalanceSnapshot{
+				AccountID: row.AccountID,
+				Asset:     account.Asset,
+				Decimals:  account.Decimals,
+				Available: row.Available,
+				Reserved:  row.Reserved,
+			})
+		}
+		sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].AccountID < snapshots[j].AccountID })
+		return PostTransactionResult{TransactionID: transaction.ID, Balances: snapshots}, nil
+	}
+
 	var entries []Entry
 	if err := tx.Where("transaction_id = ?", transaction.ID).Find(&entries).Error; err != nil {
 		return PostTransactionResult{}, fmt.Errorf("storage: load entries: %w", err)

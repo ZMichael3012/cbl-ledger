@@ -98,3 +98,13 @@ func (l *Ledger) CommitReserve(ctx context.Context, req CommitReserveRequest) (s
 func (l *Ledger) ReleaseReserve(ctx context.Context, req ReleaseReserveRequest) (storage.ReserveResult, error) {
 	return l.repo.ReleaseReserve(ctx, req.IdempotencyKey, req.ReserveID, req.Reason)
 }
+
+// GetBalance возвращает баланс счета.
+func (l *Ledger) GetBalance(ctx context.Context, accountID string) (storage.AccountBalanceView, error) {
+	return l.repo.GetBalance(ctx, accountID)
+}
+
+// ListEntries возвращает страницу выписки счета с курсором продолжения.
+func (l *Ledger) ListEntries(ctx context.Context, accountID string, limit uint32, cursor string) ([]storage.EntryView, string, error) {
+	return l.repo.ListEntries(ctx, accountID, limit, cursor)
+}

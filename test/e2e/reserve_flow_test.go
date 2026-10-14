@@ -1,7 +1,8 @@
 //go:build e2e
 
-// Пакет e2e содержит сквозной сценарий леджера на compose-стенде (KI-ledger-03):
-// Reserve -> Commit и Reserve -> Release через реальный gRPC и PostgreSQL.
+// Пакет e2e содержит сквозные сценарии леджера на compose-стенде (KI-ledger-03):
+// Reserve -> Commit / Release и PostTransaction -> GetBalance -> ListEntries
+// через реальный gRPC и PostgreSQL.
 // Запуск: powershell -NoProfile -File test/e2e/reserve_flow.ps1
 package e2e
 
@@ -56,7 +57,7 @@ func openLedgerClient(t *testing.T) ledgerv1.LedgerServiceClient {
 // seedE2EAccount создает счет с балансом для сценария.
 func seedE2EAccount(t *testing.T, db *gorm.DB, accountType string, initial int64) storage.Account {
 	t.Helper()
-	merchantRef := "e2e-" + uuid.Must(uuid.NewV7()).String()[:8]
+	merchantRef := "e2e-" + uuid.Must(uuid.NewV7()).String()
 	account := storage.Account{
 		ID:          uuid.Must(uuid.NewV7()).String(),
 		Type:        accountType,
@@ -167,4 +168,80 @@ func TestReserveCommitAndReleaseFlow(t *testing.T) {
 		ReserveId:      second.GetReserveId(),
 	})
 	require.Error(t, err, "захват released резерва должен быть отклонен")
+}
+
+func TestBalanceAndEntriesFlow(t *testing.T) {
+	db := openLedgerDB(t)
+	client := openLedgerClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	merchant := seedE2EAccount(t, db, "merchant", 50_000)
+	fee := seedE2EAccount(t, db, "fee", 0)
+	refID := "pay-" + uuid.Must(uuid.NewV7()).String()
+
+	posted, err := client.PostTransaction(ctx, &ledgerv1.PostTransactionRequest{
+		IdempotencyKey: refID + ":completed",
+		RefType:        "payment",
+		RefId:          refID,
+		Entries: []*ledgerv1.EntryInput{
+			{AccountId: merchant.ID, Direction: commonv1.Direction_DIRECTION_DEBIT, Amount: money(10_000)},
+			{AccountId: fee.ID, Direction: commonv1.Direction_DIRECTION_CREDIT, Amount: money(10_000)},
+		},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, posted.GetTransactionId())
+
+	balance, err := client.GetBalance(ctx, &ledgerv1.GetBalanceRequest{AccountId: merchant.ID})
+	require.NoError(t, err)
+	assert.Equal(t, int64(40_000), balance.GetBalance().GetAvailable().GetMinorUnits())
+	assert.Equal(t, "USDT", balance.GetBalance().GetAvailable().GetAsset())
+
+	// Вторая проводка меняет текущий баланс; повтор первой обязан вернуть снимок.
+	secondRef := "pay-" + uuid.Must(uuid.NewV7()).String()
+	_, err = client.PostTransaction(ctx, &ledgerv1.PostTransactionRequest{
+		IdempotencyKey: secondRef + ":completed",
+		RefType:        "payment",
+		RefId:          secondRef,
+		Entries: []*ledgerv1.EntryInput{
+			{AccountId: merchant.ID, Direction: commonv1.Direction_DIRECTION_DEBIT, Amount: money(5_000)},
+			{AccountId: fee.ID, Direction: commonv1.Direction_DIRECTION_CREDIT, Amount: money(5_000)},
+		},
+	})
+	require.NoError(t, err)
+
+	replay, err := client.PostTransaction(ctx, &ledgerv1.PostTransactionRequest{
+		IdempotencyKey: refID + ":completed",
+		RefType:        "payment",
+		RefId:          refID,
+		Entries: []*ledgerv1.EntryInput{
+			{AccountId: merchant.ID, Direction: commonv1.Direction_DIRECTION_DEBIT, Amount: money(10_000)},
+			{AccountId: fee.ID, Direction: commonv1.Direction_DIRECTION_CREDIT, Amount: money(10_000)},
+		},
+	})
+	require.NoError(t, err)
+	for _, snapshot := range replay.GetBalancesAfter() {
+		if snapshot.GetAccountId() == merchant.ID {
+			assert.Equal(t, int64(40_000), snapshot.GetAvailable().GetMinorUnits(),
+				"повтор возвращает снимок balances_after")
+		}
+	}
+
+	// Выписка: две проводки по счету, курсорная пагинация по одной записи.
+	page, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{AccountId: merchant.ID, Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, page.GetEntries(), 1)
+	assert.NotEmpty(t, page.GetNextCursor())
+	assert.Equal(t, commonv1.Direction_DIRECTION_DEBIT, page.GetEntries()[0].GetDirection())
+	assert.Equal(t, "payment", page.GetEntries()[0].GetRefType())
+
+	tail, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{
+		AccountId: merchant.ID,
+		Limit:     1,
+		Cursor:    page.GetNextCursor(),
+	})
+	require.NoError(t, err)
+	require.Len(t, tail.GetEntries(), 1)
+	assert.Empty(t, tail.GetNextCursor())
+	assert.Greater(t, tail.GetEntries()[0].GetEntryId(), page.GetEntries()[0].GetEntryId())
 }

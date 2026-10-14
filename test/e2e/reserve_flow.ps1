@@ -1,5 +1,6 @@
-# E2E CBL-2.4: compose-стенд ledger поднимается, миграции (до версии 7) применяются,
-# сквозной сценарий Reserve -> Commit / Reserve -> Release проходит по реальному gRPC.
+# E2E CBL-2.4 / CBL-2.5: compose-стенд ledger поднимается, миграции (до версии 8)
+# применяются, сквозные сценарии Reserve -> Commit / Reserve -> Release и
+# PostTransaction -> GetBalance -> ListEntries проходят по реальному gRPC.
 # Запуск: powershell -NoProfile -File test/e2e/reserve_flow.ps1
 $ErrorActionPreference = "Stop"
 
@@ -34,13 +35,13 @@ try {
     $logs = cmd /c "docker logs $containerId 2>&1"
     if ($LASTEXITCODE -ne 0) { throw "docker logs failed" }
     $logsText = ($logs | Out-String)
-    if ($logsText -notmatch "successfully migrated database to version: 7") { throw "migrations to version 7 did not apply" }
+    if ($logsText -notmatch "successfully migrated database to version: 8") { throw "migrations to version 8 did not apply" }
     if ($logsText -match "apply migrations failed") { throw "migrations failed" }
 
     go test -tags e2e -count=1 -v ./test/e2e/
     if ($LASTEXITCODE -ne 0) { throw "e2e scenario failed" }
 
-    Write-Host "OK: healthz ok, migrations applied (version 7), reserve flow green"
+    Write-Host "OK: healthz ok, migrations applied (version 8), reserve/balance flow green"
 } finally {
     docker compose -f $ComposeFile --profile app down -v | Out-Null
     Pop-Location

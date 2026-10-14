@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
 	ledgerv1 "github.com/cbl/cbl-protos/gen/go/billing/ledger/v1"
@@ -27,6 +28,7 @@ const (
 	maxRefFieldLen       = 128
 	maxReasonLen         = 200
 	maxAssetLen          = 32
+	maxCursorLen         = 64
 )
 
 // Ledger реализует gRPC-сервис LedgerService.
@@ -103,13 +105,10 @@ func (s *Ledger) PostTransaction(ctx context.Context, req *ledgerv1.PostTransact
 	}
 	resp := &ledgerv1.PostTransactionResponse{TransactionId: result.TransactionID}
 	for _, balance := range result.Balances {
-		money := func(units int64) *commonv1.Money {
-			return &commonv1.Money{MinorUnits: units, Asset: balance.Asset, Decimals: decimalsToUint32(balance.Decimals)}
-		}
 		resp.BalancesAfter = append(resp.BalancesAfter, &ledgerv1.AccountBalance{
 			AccountId: balance.AccountID,
-			Available: money(balance.Available),
-			Reserved:  money(balance.Reserved),
+			Available: moneyValue(balance.Available, balance.Asset, balance.Decimals),
+			Reserved:  moneyValue(balance.Reserved, balance.Asset, balance.Decimals),
 		})
 	}
 	return resp, nil
@@ -197,6 +196,69 @@ func (s *Ledger) ReleaseReserve(ctx context.Context, req *ledgerv1.ReleaseReserv
 	return &ledgerv1.ReleaseReserveResponse{ReserveId: result.ReserveID, Status: mapReserveStatus(result.Status)}, nil
 }
 
+// GetBalance возвращает доступный и зарезервированный остаток счета.
+func (s *Ledger) GetBalance(ctx context.Context, req *ledgerv1.GetBalanceRequest) (*ledgerv1.GetBalanceResponse, error) {
+	accountID := strings.TrimSpace(req.GetAccountId())
+	if _, err := uuid.Parse(accountID); err != nil {
+		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "invalid_account_id", "account_id не UUID", nil)
+	}
+	view, err := s.svc.GetBalance(ctx, accountID)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return &ledgerv1.GetBalanceResponse{Balance: &ledgerv1.AccountBalance{
+		AccountId: view.AccountID,
+		Available: moneyValue(view.Available, view.Asset, view.Decimals),
+		Reserved:  moneyValue(view.Reserved, view.Asset, view.Decimals),
+	}}, nil
+}
+
+// ListEntries возвращает страницу выписки счета по возрастанию entry_id.
+func (s *Ledger) ListEntries(ctx context.Context, req *ledgerv1.ListEntriesRequest) (*ledgerv1.ListEntriesResponse, error) {
+	accountID := strings.TrimSpace(req.GetAccountId())
+	if _, err := uuid.Parse(accountID); err != nil {
+		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "invalid_account_id", "account_id не UUID", nil)
+	}
+	if len(req.GetCursor()) > maxCursorLen {
+		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "cursor_too_long", "cursor длиннее предела", nil)
+	}
+	entries, nextCursor, err := s.svc.ListEntries(ctx, accountID, req.GetLimit(), req.GetCursor())
+	if err != nil {
+		return nil, mapError(err)
+	}
+	response := &ledgerv1.ListEntriesResponse{NextCursor: nextCursor}
+	for _, entry := range entries {
+		response.Entries = append(response.Entries, &ledgerv1.Entry{
+			EntryId:       entry.EntryID,
+			TransactionId: entry.TransactionID,
+			AccountId:     entry.AccountID,
+			Direction:     directionToProto(entry.Direction),
+			Amount:        moneyValue(entry.Amount, entry.Asset, entry.Decimals),
+			RefType:       entry.RefType,
+			RefId:         entry.RefID,
+			CreatedAt:     timestamppb.New(entry.CreatedAt),
+		})
+	}
+	return response, nil
+}
+
+// moneyValue собирает контрактную сумму с активом и decimals счета.
+func moneyValue(units int64, asset string, decimals int32) *commonv1.Money {
+	return &commonv1.Money{MinorUnits: units, Asset: asset, Decimals: decimalsToUint32(decimals)}
+}
+
+// directionToProto переводит доменное направление в контрактное.
+func directionToProto(direction domain.Direction) commonv1.Direction {
+	switch direction {
+	case domain.DirectionDebit:
+		return commonv1.Direction_DIRECTION_DEBIT
+	case domain.DirectionCredit:
+		return commonv1.Direction_DIRECTION_CREDIT
+	default:
+		return commonv1.Direction_DIRECTION_UNSPECIFIED
+	}
+}
+
 // mapReserveStatus переводит доменный статус резерва в контрактный.
 func mapReserveStatus(status domain.ReserveStatus) ledgerv1.ReserveStatus {
 	switch status {
@@ -238,7 +300,7 @@ func mapError(err error) error {
 	case errors.Is(err, domain.ErrIdempotencyReuse):
 		return grpcmw.E(grpcmw.KindAlreadyExists, "idempotency_key_reuse", "ключ идемпотентности уже использован с другим телом", err)
 	case errors.Is(err, domain.ErrUnknownAccount):
-		return grpcmw.E(grpcmw.KindNotFound, "account_not_found", "счет не найден", err)
+		return grpcmw.E(grpcmw.KindNotFound, "account_not_found", "счет не найден", nil)
 	case errors.Is(err, domain.ErrInsufficientFunds):
 		return grpcmw.E(grpcmw.KindFailedPrecondition, "insufficient_funds", "недостаточно средств", err)
 	case errors.Is(err, domain.ErrUnbalanced):
@@ -255,6 +317,8 @@ func mapError(err error) error {
 		return grpcmw.E(grpcmw.KindFailedPrecondition, "reserve_not_allowed", "счет не поддерживает резервирование", nil)
 	case errors.Is(err, domain.ErrAssetMismatch):
 		return grpcmw.E(grpcmw.KindInvalidArgument, "asset_mismatch", "активы или decimals счетов различаются", nil)
+	case errors.Is(err, domain.ErrInvalidCursor):
+		return grpcmw.E(grpcmw.KindInvalidArgument, "invalid_cursor", "курсор выписки некорректен", nil)
 	case errors.Is(err, domain.ErrConflict):
 		return grpcmw.E(grpcmw.KindResourceExhausted, "conflict", "конкурентный конфликт, повторите запрос", err)
 	default:

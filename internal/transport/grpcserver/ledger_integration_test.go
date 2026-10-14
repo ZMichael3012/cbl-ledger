@@ -167,6 +167,90 @@ func TestIntegrationGrpcPostTransaction(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestIntegrationGrpcGetBalanceAndListEntries(t *testing.T) {
+	client, db := setupLedgerServer(t)
+	merchant := seedGrpcAccount(t, db, "merchant", "USDT", 2, 50_000)
+	fee := seedGrpcAccount(t, db, "fee", "USDT", 2, 0)
+	ctx := context.Background()
+
+	_, err := client.PostTransaction(ctx, &ledgerv1.PostTransactionRequest{
+		IdempotencyKey: "pay-1:completed",
+		RefType:        "payment",
+		RefId:          "pay-1",
+		Entries: []*ledgerv1.EntryInput{
+			entry(merchant.ID, commonv1.Direction_DIRECTION_DEBIT, 10_000),
+			entry(fee.ID, commonv1.Direction_DIRECTION_CREDIT, 10_000),
+		},
+	})
+	require.NoError(t, err)
+
+	balance, err := client.GetBalance(ctx, &ledgerv1.GetBalanceRequest{AccountId: merchant.ID})
+	require.NoError(t, err)
+	assert.Equal(t, merchant.ID, balance.GetBalance().GetAccountId())
+	assert.Equal(t, int64(40_000), balance.GetBalance().GetAvailable().GetMinorUnits())
+	assert.Zero(t, balance.GetBalance().GetReserved().GetMinorUnits())
+	assert.Equal(t, "USDT", balance.GetBalance().GetAvailable().GetAsset())
+	assert.Equal(t, uint32(2), balance.GetBalance().GetAvailable().GetDecimals())
+
+	entries, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{AccountId: merchant.ID, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries.GetEntries(), 1)
+	assert.Empty(t, entries.GetNextCursor())
+
+	listed := entries.GetEntries()[0]
+	assert.Equal(t, commonv1.Direction_DIRECTION_DEBIT, listed.GetDirection())
+	assert.Equal(t, int64(10_000), listed.GetAmount().GetMinorUnits())
+	assert.Equal(t, "payment", listed.GetRefType())
+	assert.Equal(t, "pay-1", listed.GetRefId())
+	assert.NotEmpty(t, listed.GetTransactionId())
+	assert.NotNil(t, listed.GetCreatedAt())
+
+	_, err = client.GetBalance(ctx, &ledgerv1.GetBalanceRequest{
+		AccountId: "018f0000-0000-7000-8000-000000000020",
+	})
+	require.Equal(t, codes.NotFound, status.Code(err))
+
+	_, err = client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{AccountId: merchant.ID, Cursor: "junk"})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestIntegrationGrpcReplayReturnsSnapshot(t *testing.T) {
+	client, db := setupLedgerServer(t)
+	merchant := seedGrpcAccount(t, db, "merchant", "USDT", 2, 50_000)
+	fee := seedGrpcAccount(t, db, "fee", "USDT", 2, 0)
+	ctx := context.Background()
+
+	request := &ledgerv1.PostTransactionRequest{
+		IdempotencyKey: "pay-1:completed",
+		Entries: []*ledgerv1.EntryInput{
+			entry(merchant.ID, commonv1.Direction_DIRECTION_DEBIT, 10_000),
+			entry(fee.ID, commonv1.Direction_DIRECTION_CREDIT, 10_000),
+		},
+	}
+	first, err := client.PostTransaction(ctx, request)
+	require.NoError(t, err)
+
+	_, err = client.PostTransaction(ctx, &ledgerv1.PostTransactionRequest{
+		IdempotencyKey: "pay-2:completed",
+		Entries: []*ledgerv1.EntryInput{
+			entry(merchant.ID, commonv1.Direction_DIRECTION_DEBIT, 20_000),
+			entry(fee.ID, commonv1.Direction_DIRECTION_CREDIT, 20_000),
+		},
+	})
+	require.NoError(t, err)
+
+	replay, err := client.PostTransaction(ctx, request)
+	require.NoError(t, err)
+	assert.Equal(t, first.GetTransactionId(), replay.GetTransactionId())
+
+	for _, balance := range replay.GetBalancesAfter() {
+		if balance.GetAccountId() == merchant.ID {
+			assert.Equal(t, int64(40_000), balance.GetAvailable().GetMinorUnits(),
+				"повтор возвращает снимок на момент первой проводки")
+		}
+	}
+}
+
 func TestIntegrationGrpcClearingMayGoNegative(t *testing.T) {
 	client, db := setupLedgerServer(t)
 	clearing := seedGrpcAccount(t, db, "clearing", "USDT", 2, 0)

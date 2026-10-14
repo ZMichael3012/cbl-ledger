@@ -16,11 +16,12 @@ Out of scope: другие сервисы платформы; взаимодей
 ## 2. Контракты
 
 - REST: административный /healthz, /readyz
-- gRPC: сервер LedgerService (PostTransaction, Reserve, CommitReserve, ReleaseReserve)
+- gRPC: сервер LedgerService (PostTransaction, Reserve, CommitReserve, ReleaseReserve,
+  GetBalance, ListEntries)
 - Kafka продюсирует: ledger.events
 - Kafka потребляет: payment.events
 - Хранилище: PostgreSQL ledger (accounts, transactions, entries, balances, reserves,
-  reserve_operations, outbox, inbox)
+  reserve_operations, transaction_balances, outbox, inbox)
 
 Контракты заморожены в `cbl-protos` (CF-1 для gRPC, CF-2/CF-3 для событий), см. `CBL-004`.
 
@@ -37,7 +38,7 @@ make build        # go build ./...
 make test         # go test ./...
 make test-integration  # integration (testcontainers)
 make test-e2e     # сквозной сценарий резервов против поднятого compose-стенда (CBL-2.4)
-make smoke        # compose-стенд: сборка, миграции до версии 7, e2e-сценарий резервов
+make smoke        # compose-стенд: сборка, миграции до версии 8, e2e-сценарии резервов и выписки
 make bench        # бенчмарки записи на testcontainers (CBL-2.9)
 make vet          # go vet ./...
 make lint         # golangci-lint в Docker
@@ -88,11 +89,12 @@ consumer lag; дашборды после задачи 0.7.
 | ID | Проблема | Влияние | План | Статус |
 | :-- | :-- | :-- | :-- | :-- |
 | KI-ledger-01 | CI и pre-commit не настроены | линтеры запускаются вручную | задача 0.2 | open |
-| KI-ledger-02 | Нет mTLS и authN на gRPC LedgerService | порт 9040 не публиковать за пределы доверенной сети; prod-выкладка запрещена | mTLS и авторизация до prod (0.6, 1.4) | open |
+| KI-ledger-02 | Нет mTLS и authN на gRPC LedgerService: запись, резервы, чтение балансов и полной выписки (с ref_id) любого счета | порт 9040 не публиковать за пределы доверенной сети; prod-выкладка запрещена | mTLS и авторизация до prod (0.6, 1.4); неймспейсинг ключей идемпотентности по мерчанту - вместе с authN (оракул глобального ключа) | open |
 | KI-ledger-03 | Сценарии e2e в `test/e2e/` отсутствуют | шаг 8 выполнен частично: integration, smoke compose и k6-нагрузка (2.9, `test/load/`) есть; сценариев e2e нет | ЗАКРЫТ 14.10.2026: e2e compose-сценарий резервов `test/e2e/reserve_flow.ps1` + `make smoke` (Reserve/Commit/Release через реальный gRPC и PostgreSQL) | closed |
 | KI-ledger-04 | Race detector недоступен локально (нет CGO на Windows) | конкурентные тесты идут без -race | включить -race в CI (0.2) | open |
 | KI-ledger-05 | Функция `balances_non_negative()` (миграция 00005) не фиксирует `search_path` | низкое: подмена требует прав CREATE в схеме раньше public; 00006 захардена (`public.entries`, search_path) | применить hardening отдельной миграцией при плановом изменении 00005 | open |
 | KI-ledger-06 | Нет серверного deadline-интерцептора и ограничения очереди RPC: при насыщении пула запрос без клиентского дедлайна может ждать долго | availability-риск вне денежного контура; нагрузка 2.9 деградирует ростом латентности, не ошибками | timeout-интерцептор и MaxConcurrentStreams до prod (0.6/14.4); prod запрещен KI-ledger-02 | open |
+| KI-ledger-07 | `transaction_balances` растет примерно 1:1 к `entries` (строка на затронутый счет), ретеншен и партиционирование не заданы | рост БД, удорожание бэкапов; чтения по PK от роста не страдают | партиционирование/ретеншен вместе с `entries` - задача 14.2; `created_at` уже пишется (2.5) | open |
 
 ## 10. Журнал задач
 
@@ -102,7 +104,8 @@ consumer lag; дашборды после задачи 0.7.
 | CBL-2.2 | 2026-10-14 | done, ревью закрыто (идемпотентность по хэшу тела, покрытие 90.7%) | `.specs/CBL-2.2-post-transaction.md` | a2d0606 |
 | CBL-2.3 | 2026-10-14 | done, ревью закрыто (RetryPolicy + полный jitter, observer, миграция 00006, покрытие 91.7%) | `.specs/CBL-2.3-concurrency.md` | 0b623af |
 | CBL-2.9 | 2026-10-14 | done, ревью закрыто (бенчмарки, k6 500/1000 rps, потолок пула БД, стратегия в ADR-2.9) | `.specs/CBL-2.9-benchmark-sharding.md` | b663447 |
-| CBL-2.4 | 2026-10-14 | done, ревью закрыто (резервы с конечным автоматом, миграция 00007, e2e compose, покрытие 86.6%) | `.specs/CBL-2.4-reserves.md` | этот коммит |
+| CBL-2.4 | 2026-10-14 | done, ревью закрыто (резервы с конечным автоматом, миграция 00007, e2e compose, покрытие 86.6%) | `.specs/CBL-2.4-reserves.md` | f3d4b9e |
+| CBL-2.5 | 2026-10-14 | done, ревью закрыто (GetBalance/ListEntries, миграция 00008, снимки balances_after, покрытие 87.3%) | `.specs/CBL-2.5-balance-queries.md` | этот коммит |
 
 ## 11. Runbook
 
