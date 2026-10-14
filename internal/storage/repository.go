@@ -128,6 +128,8 @@ func retryCause(err error) string {
 		return "lock_conflict"
 	case errors.Is(err, errIdempotentRace):
 		return "idempotency_race"
+	case errors.Is(err, errReserveStateRace):
+		return "reserve_state_race"
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "40P01" {

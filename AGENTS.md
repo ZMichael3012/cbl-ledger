@@ -16,10 +16,11 @@ Out of scope: другие сервисы платформы; взаимодей
 ## 2. Контракты
 
 - REST: административный /healthz, /readyz
-- gRPC: сервер LedgerService
+- gRPC: сервер LedgerService (PostTransaction, Reserve, CommitReserve, ReleaseReserve)
 - Kafka продюсирует: ledger.events
 - Kafka потребляет: payment.events
-- Хранилище: PostgreSQL ledger
+- Хранилище: PostgreSQL ledger (accounts, transactions, entries, balances, reserves,
+  reserve_operations, outbox, inbox)
 
 Контракты заморожены в `cbl-protos` (CF-1 для gRPC, CF-2/CF-3 для событий), см. `CBL-004`.
 
@@ -35,6 +36,8 @@ goose, zap). `AutoMigrate` запрещен, миграции только goose
 make build        # go build ./...
 make test         # go test ./...
 make test-integration  # integration (testcontainers)
+make test-e2e     # сквозной сценарий резервов против поднятого compose-стенда (CBL-2.4)
+make smoke        # compose-стенд: сборка, миграции до версии 7, e2e-сценарий резервов
 make bench        # бенчмарки записи на testcontainers (CBL-2.9)
 make vet          # go vet ./...
 make lint         # golangci-lint в Docker
@@ -78,6 +81,7 @@ consumer lag; дашборды после задачи 0.7.
 | T-LED-03 | Отрицательный `available` разрешен для clearing, fee и suspense | поддержка потока Dr clearing / Cr merchant без префандинга | ошибка в политике возможна у транзитных счетов | контроль по типам счетов, мониторинг suspense в 2.6 |
 | T-LED-04 | Пул соединений PostgreSQL ограничен (`DB_MAX_OPEN_CONNS=20`, потолок конфигурации 100) | защита `max_connections` от всплесков, предсказуемая деградация | при насыщении запросы ждут соединение | найдено нагрузкой 2.9 (ошибки Internal при 500 rps); значения тюнируются через env, запас 4x по замеру 2070 записей/с |
 | T-LED-05 | Горячий счет остается на оптимистичном CAS до порога 200 записей/с | простая модель, нет блокировок строк на общих путях | при 24 писателях в один счет пропускная способность падает (168 записей/с, 14% отказов) | план защиты по порогу: сокращение операторов, батчевый коммиттер, шардирование счета (2.9, раздел 3.2) |
+| T-LED-06 | Резерв - удержание: Reserve/Release меняют только available/reserved без проводок, Commit пишет сбалансированную пару Dr источник / Cr счет выплат | удержание не создает фиктивного движения в журнале, компенсация дешева (release) | балансы не выводятся из одних entries, нужен учет reserves (CBL-000, раздел 6); получатель коммита не в контракте CF-1 | получатель - счет выплат того же merchant_ref и актива (ADR-2.4, спека 2.4); события reserve.* - в 2.7; fail-closed для счетов мерчанта без merchant_ref |
 
 ## 9. Known issues
 
@@ -85,7 +89,7 @@ consumer lag; дашборды после задачи 0.7.
 | :-- | :-- | :-- | :-- | :-- |
 | KI-ledger-01 | CI и pre-commit не настроены | линтеры запускаются вручную | задача 0.2 | open |
 | KI-ledger-02 | Нет mTLS и authN на gRPC LedgerService | порт 9040 не публиковать за пределы доверенной сети; prod-выкладка запрещена | mTLS и авторизация до prod (0.6, 1.4) | open |
-| KI-ledger-03 | Сценарии e2e в `test/e2e/` отсутствуют | шаг 8 выполнен частично: integration, smoke compose и k6-нагрузка (2.9, `test/load/`) есть; сценариев e2e нет | e2e в 2.4 | open |
+| KI-ledger-03 | Сценарии e2e в `test/e2e/` отсутствуют | шаг 8 выполнен частично: integration, smoke compose и k6-нагрузка (2.9, `test/load/`) есть; сценариев e2e нет | ЗАКРЫТ 14.10.2026: e2e compose-сценарий резервов `test/e2e/reserve_flow.ps1` + `make smoke` (Reserve/Commit/Release через реальный gRPC и PostgreSQL) | closed |
 | KI-ledger-04 | Race detector недоступен локально (нет CGO на Windows) | конкурентные тесты идут без -race | включить -race в CI (0.2) | open |
 | KI-ledger-05 | Функция `balances_non_negative()` (миграция 00005) не фиксирует `search_path` | низкое: подмена требует прав CREATE в схеме раньше public; 00006 захардена (`public.entries`, search_path) | применить hardening отдельной миграцией при плановом изменении 00005 | open |
 | KI-ledger-06 | Нет серверного deadline-интерцептора и ограничения очереди RPC: при насыщении пула запрос без клиентского дедлайна может ждать долго | availability-риск вне денежного контура; нагрузка 2.9 деградирует ростом латентности, не ошибками | timeout-интерцептор и MaxConcurrentStreams до prod (0.6/14.4); prod запрещен KI-ledger-02 | open |
@@ -96,11 +100,23 @@ consumer lag; дашборды после задачи 0.7.
 | :-- | :-- | :-- | :-- | :-- |
 | CBL-2.1 | 2026-10-14 | done, ревью закрыто (миграции 00001 - 00005, append-only триггер, non-negative) | `.specs/CBL-2.1-ledger-schema.md` | fb47705 |
 | CBL-2.2 | 2026-10-14 | done, ревью закрыто (идемпотентность по хэшу тела, покрытие 90.7%) | `.specs/CBL-2.2-post-transaction.md` | a2d0606 |
-| CBL-2.3 | 2026-10-14 | done, ревью закрыто (RetryPolicy + полный jitter, observer, миграция 00006, покрытие 91.7%) | `.specs/CBL-2.3-concurrency.md` | этот коммит |
-| CBL-2.9 | 2026-10-14 | done, ревью закрыто (бенчмарки, k6 500/1000 rps, потолок пула БД, стратегия в ADR-2.9) | `.specs/CBL-2.9-benchmark-sharding.md` | этот коммит |
+| CBL-2.3 | 2026-10-14 | done, ревью закрыто (RetryPolicy + полный jitter, observer, миграция 00006, покрытие 91.7%) | `.specs/CBL-2.3-concurrency.md` | 0b623af |
+| CBL-2.9 | 2026-10-14 | done, ревью закрыто (бенчмарки, k6 500/1000 rps, потолок пула БД, стратегия в ADR-2.9) | `.specs/CBL-2.9-benchmark-sharding.md` | b663447 |
+| CBL-2.4 | 2026-10-14 | done, ревью закрыто (резервы с конечным автоматом, миграция 00007, e2e compose, покрытие 86.6%) | `.specs/CBL-2.4-reserves.md` | этот коммит |
 
 ## 11. Runbook
 
 Заполняется первой продуктовой задачей сервиса. Типовые аварии: недоступность зависимости,
 рост ошибок, лаг обработки; действия: проверить health/metrics, логи с request_id, состояние
 Kafka consumer group и outbox lag, при необходимости перезапустить сервис.
+
+Резервы (2.4):
+
+1. Зависшие `active` резервы вне саги: `SELECT ref_id, account_id, amount FROM reserves
+   WHERE status = 'active'` - сверять с Payout (10.x); освобождать через `ReleaseReserve`
+   тем же ref, не правкой строк.
+2. `conflict` (resource_exhausted) на Reserve/Commit: конкуренция на счете; проверить метрики
+   повторов (cause `lock_conflict`, `reserve_state_race`), при систематике - план 2.9/14.6.
+3. Проводки захвата искать с `ref_type = 'reserve'`; саммари - счет выплат того же
+   `merchant_ref`; расхождения балансов без проводок (available/reserved) - это удержания,
+   а не потерянные деньги (T-LED-06).

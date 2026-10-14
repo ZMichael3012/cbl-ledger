@@ -88,6 +88,12 @@ func seedGrpcAccount(t *testing.T, db *gorm.DB, accountType, asset string, decim
 		Decimals:  decimals,
 		CreatedAt: time.Now().UTC(),
 	}
+	// Резервы доступны только счетам мерчанта со ссылкой на мерчанта: провижининг
+	// (2.6) проставляет ее; тестовый сев повторяет это соглашение.
+	if accountType == "merchant" {
+		ref := "grpc-" + account.ID
+		account.MerchantRef = &ref
+	}
 	require.NoError(t, db.Create(&account).Error)
 	require.NoError(t, db.Create(&storage.Balance{
 		AccountID: account.ID,
@@ -181,4 +187,123 @@ func TestIntegrationGrpcClearingMayGoNegative(t *testing.T) {
 			assert.Equal(t, int64(-500), balance.GetAvailable().GetMinorUnits())
 		}
 	}
+}
+
+func reserveMoney(units int64) *commonv1.Money {
+	return &commonv1.Money{MinorUnits: units, Asset: "USDT", Decimals: 2}
+}
+
+func TestIntegrationGrpcReserveCommitRelease(t *testing.T) {
+	client, db := setupLedgerServer(t)
+	merchant := seedGrpcAccount(t, db, "merchant", "USDT", 2, 100_000)
+	ctx := context.Background()
+
+	reserved, err := client.Reserve(ctx, &ledgerv1.ReserveRequest{
+		IdempotencyKey: "payout-1:reserve",
+		AccountId:      merchant.ID,
+		Amount:         reserveMoney(40_000),
+		RefId:          "payout-1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ledgerv1.ReserveStatus_RESERVE_STATUS_ACTIVE, reserved.GetStatus())
+	require.NotEmpty(t, reserved.GetReserveId())
+
+	committed, err := client.CommitReserve(ctx, &ledgerv1.CommitReserveRequest{
+		IdempotencyKey: "payout-1:commit",
+		ReserveId:      reserved.GetReserveId(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ledgerv1.ReserveStatus_RESERVE_STATUS_COMMITTED, committed.GetStatus())
+
+	var balance storage.Balance
+	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)
+	assert.Equal(t, int64(60_000), balance.Available)
+	assert.Zero(t, balance.Reserved)
+
+	var transactionCount int64
+	require.NoError(t, db.Model(&storage.Transaction{}).Count(&transactionCount).Error)
+	assert.Equal(t, int64(1), transactionCount)
+
+	second, err := client.Reserve(ctx, &ledgerv1.ReserveRequest{
+		IdempotencyKey: "payout-2:reserve",
+		AccountId:      merchant.ID,
+		Amount:         reserveMoney(10_000),
+		RefId:          "payout-2",
+	})
+	require.NoError(t, err)
+
+	released, err := client.ReleaseReserve(ctx, &ledgerv1.ReleaseReserveRequest{
+		IdempotencyKey: "payout-2:release",
+		ReserveId:      second.GetReserveId(),
+		Reason:         "gateway rejected",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ledgerv1.ReserveStatus_RESERVE_STATUS_RELEASED, released.GetStatus())
+
+	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)
+	assert.Equal(t, int64(60_000), balance.Available, "возврат резерва восстановил доступный баланс")
+}
+
+func TestIntegrationGrpcReserveErrorCodes(t *testing.T) {
+	client, db := setupLedgerServer(t)
+	merchant := seedGrpcAccount(t, db, "merchant", "USDT", 2, 1_000)
+	clearing := seedGrpcAccount(t, db, "clearing", "USDT", 2, 1_000)
+	ctx := context.Background()
+
+	_, err := client.Reserve(ctx, &ledgerv1.ReserveRequest{
+		IdempotencyKey: "payout-1:reserve",
+		AccountId:      merchant.ID,
+		Amount:         reserveMoney(100_000),
+		RefId:          "payout-1",
+	})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "нехватка средств")
+
+	_, err = client.Reserve(ctx, &ledgerv1.ReserveRequest{
+		IdempotencyKey: "payout-2:reserve",
+		AccountId:      clearing.ID,
+		Amount:         reserveMoney(100),
+		RefId:          "payout-2",
+	})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "резерв на транзитном счете запрещен")
+
+	_, err = client.CommitReserve(ctx, &ledgerv1.CommitReserveRequest{
+		IdempotencyKey: "payout-3:commit",
+		ReserveId:      uuid.Must(uuid.NewV7()).String(),
+	})
+	require.Equal(t, codes.NotFound, status.Code(err), "неизвестный резерв")
+
+	active, err := client.Reserve(ctx, &ledgerv1.ReserveRequest{
+		IdempotencyKey: "payout-3:reserve",
+		AccountId:      merchant.ID,
+		Amount:         reserveMoney(100),
+		RefId:          "payout-3",
+	})
+	require.NoError(t, err)
+	_, err = client.ReleaseReserve(ctx, &ledgerv1.ReleaseReserveRequest{
+		IdempotencyKey: "payout-3:release",
+		ReserveId:      active.GetReserveId(),
+		Reason:         "cancel",
+	})
+	require.NoError(t, err)
+	_, err = client.CommitReserve(ctx, &ledgerv1.CommitReserveRequest{
+		IdempotencyKey: "payout-3:commit",
+		ReserveId:      active.GetReserveId(),
+	})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "захват освобожденного резерва")
+
+	_, err = client.Reserve(ctx, &ledgerv1.ReserveRequest{
+		IdempotencyKey: "payout-4:reserve",
+		AccountId:      merchant.ID,
+		Amount:         &commonv1.Money{MinorUnits: 100, Asset: "BTC", Decimals: 8},
+		RefId:          "payout-4",
+	})
+	require.Equal(t, codes.InvalidArgument, status.Code(err), "чужой актив")
+
+	_, err = client.Reserve(ctx, &ledgerv1.ReserveRequest{
+		IdempotencyKey: "payout-3:reserve",
+		AccountId:      merchant.ID,
+		Amount:         reserveMoney(900),
+		RefId:          "payout-3",
+	})
+	require.Equal(t, codes.AlreadyExists, status.Code(err), "ключ резерва занят другим телом")
 }

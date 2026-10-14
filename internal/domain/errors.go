@@ -20,4 +20,12 @@ var (
 	ErrConflict = errors.New("ledger: concurrent update conflict")
 	// ErrIdempotencyReuse сообщает о повторе ключа идемпотентности с другим телом.
 	ErrIdempotencyReuse = errors.New("ledger: idempotency key reuse with different payload")
+	// ErrInvalidReserve сообщает о некорректном запросе резерва.
+	ErrInvalidReserve = errors.New("ledger: invalid reserve request")
+	// ErrUnknownReserve сообщает о несуществующем резерве.
+	ErrUnknownReserve = errors.New("ledger: unknown reserve")
+	// ErrReserveState сообщает о недопустимом переходе состояния резерва.
+	ErrReserveState = errors.New("ledger: reserve in invalid state")
+	// ErrReserveNotAllowed сообщает, что тип счета не поддерживает резервирование.
+	ErrReserveNotAllowed = errors.New("ledger: reserve is not allowed for account")
 )
