@@ -40,7 +40,7 @@ goose, zap). `AutoMigrate` запрещен, миграции только goose
 ```powershell
 make build        # go build ./...
 make test         # go test ./...
-make test-integration  # integration (testcontainers)
+make test-integration  # integration (testcontainers), включая property-тесты инвариантов (2.8)
 make test-e2e     # сквозные сценарии резервов, выписки и consumer (Kafka+PG на testcontainers)
 make smoke        # compose-стенд: сборка, миграции до версии 8, топики, consumer, e2e
 make bench        # бенчмарки записи на testcontainers (CBL-2.9)
@@ -91,6 +91,7 @@ consumer lag; дашборды после задачи 0.7.
 | T-LED-07 | Правила плана счетов (2.6) обеспечиваются валидацией и единственным провижининг-путем, без CHECK-ограничений БД | миграция не ломает уже примененные dev-стенды с legacy-счетами | прямой SQL может создать off-plan счет (lowercase asset, ref у платформенного типа) | денежные инварианты не затрагиваются (резервы fail-closed по типу/ref/asset, проводки сбалансированы); лечение балансов ограничено счетами без проводок |
 | T-LED-08 | Handler consumer (2.7) не использует транзакцию Guard: проводка идемпотентна по бизнес-ключу `payment:{id}:completed`, inbox - второй барьер | нет пересмотра retry-контура 2.3; один компактный commit на событие | сбой между коммитами проводки и inbox безопасен (replay), но требует канонизации `payment_id` (реализовано) | конкурентные дубли подтверждены integration-тестом; события пишутся в outbox атомарно с проводкой |
 | T-LED-09 | Ключ партиции `ledger.events` - лексикографически минимальный account_id проводки | стабильная партиция события, дедуп по event_id в заголовке | события одного счета могут попасть в разные партиции (порядок не обещан); min-ключ тянет долю событий к платформенным счетам (clearing/fee) | потребители коррелируют по `ref_id`/`transaction_id`, а не по порядку; при необходимости ключ пересматривается в CF-2 |
+| T-LED-10 | Property-тесты без новых зависимостей: `testing/quick` для домена, детерминированный генератор на `math/rand/v2` для хранилища | нулевые зависимости, воспроизводимость по `PROPERTY_SEED`, проверка после каждой операции | ручной генератор, нет шринкинга, инварианты дублируют SQL-схему | независимость проверок подтверждена мутациями; локализация сбоя - стадия и сид; расширение `pgregory.net/rapid` - только при пересмотре в 14.x |
 
 ## 9. Known issues
 
@@ -117,7 +118,8 @@ consumer lag; дашборды после задачи 0.7.
 | CBL-2.4 | 2026-10-14 | done, ревью закрыто (резервы с конечным автоматом, миграция 00007, e2e compose, покрытие 86.6%) | `.specs/CBL-2.4-reserves.md` | f3d4b9e |
 | CBL-2.5 | 2026-10-14 | done, ревью закрыто (GetBalance/ListEntries, миграция 00008, снимки balances_after, покрытие 87.3%) | `.specs/CBL-2.5-balance-queries.md` | 19ff6f5 |
 | CBL-2.6 | 2026-10-14 | done, ревью закрыто (детерминированные счета, EnsureAccount, golden-векторы, покрытие 87.6%) | `.specs/CBL-2.6-account-plan.md` | df71640 |
-| CBL-2.7 | 2026-10-14 | done, ревью закрыто (consumer payment.completed, ledger.events через outbox, kit-фикс DLQ, покрытие 87.3%) | `.specs/CBL-2.7-payment-consumer.md` | этот коммит |
+| CBL-2.7 | 2026-10-14 | done, ревью закрыто (consumer payment.completed, ledger.events через outbox, kit-фикс DLQ, покрытие 87.3%) | `.specs/CBL-2.7-payment-consumer.md` | 594afeb |
+| CBL-2.8 | 2026-10-14 | done, ревью закрыто (property-тесты инвариантов с мутационной проверкой, покрытие 87.7%) | `.specs/CBL-2.8-property-tests.md` | этот коммит |
 
 ## 11. Runbook
 
