@@ -1,4 +1,4 @@
-.PHONY: build test test-integration vet lint fmt vuln up down
+.PHONY: build test test-integration vet lint fmt vuln up down bench
 
 build:
 	go build ./...
@@ -8,6 +8,10 @@ test:
 
 test-integration:
 	go test -tags integration -count=1 ./internal/...
+
+# bench запускает все бенчмарки записи леджера на testcontainers PostgreSQL (CBL-2.9).
+bench:
+	go test -tags integration -run "^$$" -bench "." -benchtime=3s ./internal/storage/
 
 vet:
 	go vet ./...

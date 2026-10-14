@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -51,6 +52,21 @@ func main() {
 		log.Error("connect postgres failed", zap.Error(err))
 		return
 	}
+
+	// Пул ограничен: без потолка всплеск нагрузки исчерпывает max_connections PostgreSQL
+	// (обнаружено нагрузочным тестом 2.9: ошибки under load при 500 rps).
+	// Потолок конфигурации ограничен сверху, чтобы опечатка в env не исчерпала БД.
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Error("resolve sql db failed", zap.Error(err))
+		return
+	}
+	maxOpen := min(getenvInt("DB_MAX_OPEN_CONNS", 20), 100)
+	maxIdle := min(getenvInt("DB_MAX_IDLE_CONNS", 10), maxOpen)
+	sqlDB.SetMaxOpenConns(maxOpen)
+	sqlDB.SetMaxIdleConns(maxIdle)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	log.Info("postgres pool configured", zap.Int("max_open", maxOpen), zap.Int("max_idle", maxIdle))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -152,6 +168,16 @@ func metricsHandler() http.Handler {
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// getenvInt возвращает положительное целое из переменной окружения или значение по умолчанию.
+func getenvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
 	}
 	return fallback
 }

@@ -20,6 +20,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"github.com/cbl/cbl-kit/storagex"
 
@@ -46,7 +47,9 @@ func setupLedgerDB(t testing.TB) *gorm.DB {
 
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	// Тихий логгер GORM: "record not found" в идемпотентном пути и логи бенчмарков
+	// забивают вывод; ошибки тесты проверяют через возвращаемые значения.
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	require.NoError(t, err)
 	require.NoError(t, storagex.Migrate(ctx, db, filepath.Join("..", "..", "migrations")))
 	return db
