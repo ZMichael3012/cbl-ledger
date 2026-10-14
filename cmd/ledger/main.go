@@ -61,7 +61,12 @@ func main() {
 		return
 	}
 
-	repo := storage.NewRepository(db, log)
+	repo := storage.NewRepository(db, log, storage.WithRetryObserver(func(event storage.RetryEvent) {
+		log.Warn("ledger retry",
+			zap.Int("attempt", event.Attempt),
+			zap.String("cause", event.Cause),
+			zap.Duration("delay", event.Delay))
+	}))
 	ledgerSvc := usecase.NewLedger(repo, log)
 
 	httpAddr := getenv("HTTP_ADDR", ":8040")

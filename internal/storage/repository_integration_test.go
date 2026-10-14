@@ -27,7 +27,7 @@ import (
 	"github.com/cbl/cbl-ledger/internal/storage"
 )
 
-func setupLedgerDB(t *testing.T) *gorm.DB {
+func setupLedgerDB(t testing.TB) *gorm.DB {
 	t.Helper()
 	ctx := context.Background()
 	container, err := tcpostgres.Run(ctx,
@@ -52,7 +52,7 @@ func setupLedgerDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func seedAccount(t *testing.T, db *gorm.DB, accountType, asset string, decimals int32, merchantRef string, initial int64) storage.Account {
+func seedAccount(t testing.TB, db *gorm.DB, accountType, asset string, decimals int32, merchantRef string, initial int64) storage.Account {
 	t.Helper()
 	account := storage.Account{
 		ID:        uuid.Must(uuid.NewV7()).String(),

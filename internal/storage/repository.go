@@ -20,8 +20,121 @@ import (
 	"github.com/cbl/cbl-ledger/internal/domain"
 )
 
-// maxOptimisticRetries задает предел повторов при конфликте оптимистичной блокировки.
-const maxOptimisticRetries = 8
+// RetryPolicy задает политику повторов при конкурентных конфликтах.
+type RetryPolicy struct {
+	// MaxAttempts задает предельное число попыток проводки.
+	MaxAttempts int
+	// BaseDelay задает базовую паузу между попытками.
+	BaseDelay time.Duration
+	// MaxDelay задает потолок паузы между попытками.
+	MaxDelay time.Duration
+}
+
+// DefaultRetryPolicy возвращает политику повторов по умолчанию:
+// 8 попыток, база 5 мс, потолок 250 мс, суммарно не более ~1 с ожидания.
+func DefaultRetryPolicy() RetryPolicy {
+	return RetryPolicy{
+		MaxAttempts: 8,
+		BaseDelay:   5 * time.Millisecond,
+		MaxDelay:    250 * time.Millisecond,
+	}
+}
+
+// maxRetryAttemptsCeiling ограничивает кастомную политику сверху, чтобы долгоживущие
+// вызовы (например, consumer 2.7) не могли зациклиться на конфликтах.
+const maxRetryAttemptsCeiling = 32
+
+// normalizeRetryPolicy заменяет невалидные поля политики значениями по умолчанию,
+// чтобы нулевое значение Repository работало без явной конфигурации.
+// Потолок ниже базовой паузы поднимается до нее, число попыток ограничено сверху.
+func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
+	defaults := DefaultRetryPolicy()
+	if policy.MaxAttempts <= 0 {
+		policy.MaxAttempts = defaults.MaxAttempts
+	}
+	if policy.MaxAttempts > maxRetryAttemptsCeiling {
+		policy.MaxAttempts = maxRetryAttemptsCeiling
+	}
+	if policy.BaseDelay <= 0 {
+		policy.BaseDelay = defaults.BaseDelay
+	}
+	if policy.MaxDelay <= 0 {
+		policy.MaxDelay = defaults.MaxDelay
+	}
+	if policy.MaxDelay < policy.BaseDelay {
+		policy.MaxDelay = policy.BaseDelay
+	}
+	return policy
+}
+
+// nextDelay вычисляет паузу перед попыткой attempt по схеме полного jitter:
+// равномерное значение из [0, min(MaxDelay, BaseDelay << attempt)].
+// randN инжектируется для детерминированных тестов.
+func (policy RetryPolicy) nextDelay(attempt int, randN func(int64) int64) time.Duration {
+	limit := policy.BaseDelay
+	for i := 0; i < attempt && limit < policy.MaxDelay; i++ {
+		// Удвоение только при заведомо безопасном значении: иначе переполнение int64.
+		if limit > policy.MaxDelay/2 {
+			limit = policy.MaxDelay
+			break
+		}
+		limit *= 2
+	}
+	if limit > policy.MaxDelay {
+		limit = policy.MaxDelay
+	}
+	if limit <= 0 {
+		return 0
+	}
+	bound := int64(limit)
+	if bound < math.MaxInt64 {
+		bound++
+	}
+	return time.Duration(randN(bound))
+}
+
+// RetryEvent описывает один повтор проводки для наблюдателей.
+type RetryEvent struct {
+	// Attempt задает номер повторяемой попытки, начиная с 1.
+	Attempt int
+	// Cause задает причину повтора: lock_conflict, idempotency_race, deadlock или unknown.
+	Cause string
+	// Delay задает паузу перед следующей попыткой.
+	Delay time.Duration
+}
+
+// RetryObserver получает события повторов; вызывается перед паузой.
+// Может вызываться конкурентно из нескольких горутин и не должен паниковать:
+// паника наблюдателя уронила бы обработку запроса.
+type RetryObserver func(RetryEvent)
+
+// Option настраивает Repository.
+type Option func(*Repository)
+
+// WithRetryPolicy задает политику повторов вместо политики по умолчанию.
+func WithRetryPolicy(policy RetryPolicy) Option {
+	return func(r *Repository) { r.retryPolicy = policy }
+}
+
+// WithRetryObserver подключает наблюдателя повторов (лог, метрики).
+func WithRetryObserver(observer RetryObserver) Option {
+	return func(r *Repository) { r.retryObserver = observer }
+}
+
+// retryCause классифицирует причину повтора для наблюдателей.
+func retryCause(err error) string {
+	switch {
+	case errors.Is(err, errLockConflict):
+		return "lock_conflict"
+	case errors.Is(err, errIdempotentRace):
+		return "idempotency_race"
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
+		return "deadlock"
+	}
+	return "unknown"
+}
 
 // restrictedAccountTypes задает типы счетов, где отрицательный баланс запрещен.
 // Транзитные счета (clearing, fee, suspense) могут уходить в минус до клиринга.
@@ -63,21 +176,27 @@ type PostTransactionResult struct {
 
 // Repository выполняет транзакции двойной записи в PostgreSQL.
 type Repository struct {
-	db  *gorm.DB
-	log *zap.Logger
+	db            *gorm.DB
+	log           *zap.Logger
+	retryPolicy   RetryPolicy
+	retryObserver RetryObserver
 }
 
-// NewRepository создает Repository.
-func NewRepository(db *gorm.DB, log *zap.Logger) *Repository {
+// NewRepository создает Repository; опции настраивают политику и наблюдателя повторов.
+func NewRepository(db *gorm.DB, log *zap.Logger, opts ...Option) *Repository {
 	if log == nil {
 		log = zap.NewNop()
 	}
-	return &Repository{db: db, log: log}
+	repository := &Repository{db: db, log: log}
+	for _, opt := range opts {
+		opt(repository)
+	}
+	return repository
 }
 
 // PostTransaction выполняет сбалансированную проводку с идемпотентностью по ключу
-// и оптимистичной блокировкой балансов; при конфликтах повторяет с backoff и jitter.
-// Повтор ключа с другим телом отклоняется ошибкой ErrIdempotencyReuse.
+// и оптимистичной блокировкой балансов; при конфликтах повторяет согласно политике
+// (полный jitter, потолок паузы). Повтор ключа с другим телом отклоняется ErrIdempotencyReuse.
 func (r *Repository) PostTransaction(ctx context.Context, idempotencyKey, refType, refID string, entries []domain.EntryInput) (PostTransactionResult, error) {
 	if strings.TrimSpace(idempotencyKey) == "" {
 		return PostTransactionResult{}, fmt.Errorf("%w: empty idempotency_key", domain.ErrInvalidTransaction)
@@ -91,28 +210,34 @@ func (r *Repository) PostTransaction(ctx context.Context, idempotencyKey, refTyp
 	}
 	hash := requestHash(refType, refID, normalized)
 
-	backoff := 5 * time.Millisecond
-	for attempt := 0; attempt < maxOptimisticRetries; attempt++ {
+	policy := normalizeRetryPolicy(r.retryPolicy)
+	var lastErr error
+	for attempt := 0; attempt < policy.MaxAttempts; attempt++ {
 		result, err := r.postOnce(ctx, idempotencyKey, refType, refID, normalized, hash)
-		switch {
-		case err == nil:
+		if err == nil {
 			return result, nil
-		case isRetryable(err):
-			// Jitter снижает столкновения повторов; криптостойкость здесь не требуется.
-			delay := backoff + time.Duration(rand.Int64N(int64(backoff)+1)) //nolint:gosec // G404: jitter, не криптография
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return PostTransactionResult{}, ctx.Err()
-			case <-timer.C:
-			}
-			backoff *= 2
-		default:
+		}
+		if !isRetryable(err) {
 			return PostTransactionResult{}, err
 		}
+		lastErr = err
+		if attempt == policy.MaxAttempts-1 {
+			break
+		}
+		// Полный jitter снижает синхронные повторные столкновения; криптостойкость не нужна.
+		delay := policy.nextDelay(attempt, rand.Int64N) //nolint:gosec // G404: jitter, не криптография
+		if r.retryObserver != nil {
+			r.retryObserver(RetryEvent{Attempt: attempt + 1, Cause: retryCause(err), Delay: delay})
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return PostTransactionResult{}, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return PostTransactionResult{}, fmt.Errorf("%w: exceeded %d retries", domain.ErrConflict, maxOptimisticRetries)
+	return PostTransactionResult{}, fmt.Errorf("%w: exceeded %d attempts: %w", domain.ErrConflict, policy.MaxAttempts, lastErr)
 }
 
 // normalizeEntries приводит идентификаторы счетов к каноническому виду UUID.
