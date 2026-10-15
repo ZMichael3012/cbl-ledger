@@ -5,10 +5,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
 	ledgerv1 "github.com/cbl/cbl-protos/gen/go/billing/ledger/v1"
@@ -38,6 +40,8 @@ func TestMapError(t *testing.T) {
 		{name: "reserve state", err: domain.ErrReserveState, want: grpcmw.KindFailedPrecondition},
 		{name: "reserve not allowed", err: domain.ErrReserveNotAllowed, want: grpcmw.KindFailedPrecondition},
 		{name: "invalid cursor", err: domain.ErrInvalidCursor, want: grpcmw.KindInvalidArgument},
+		{name: "invalid query", err: domain.ErrInvalidQuery, want: grpcmw.KindInvalidArgument},
+		{name: "too many results", err: domain.ErrTooManyResults, want: grpcmw.KindResourceExhausted},
 		{name: "invalid account plan", err: domain.ErrInvalidAccountPlan, want: grpcmw.KindFailedPrecondition},
 		{name: "account conflict", err: domain.ErrAccountConflict, want: grpcmw.KindFailedPrecondition},
 		{name: "conflict", err: domain.ErrConflict, want: grpcmw.KindResourceExhausted},
@@ -219,6 +223,46 @@ func TestListEntriesValidation(t *testing.T) {
 		AccountId: accountID,
 		Cursor:    strings.Repeat("c", maxCursorLen+1),
 	})
+	require.Error(t, err)
+	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
+
+	// Нужен account_id или merchant_ref (2.10).
+	_, err = server.ListEntries(ctx, &ledgerv1.ListEntriesRequest{})
+	require.Error(t, err)
+	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
+
+	_, err = server.ListEntries(ctx, &ledgerv1.ListEntriesRequest{MerchantRef: "bad ref!"})
+	require.Error(t, err)
+	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
+
+	// Период: невалидная метка и инверсные границы отклоняются до хранилища.
+	_, err = server.ListEntries(ctx, &ledgerv1.ListEntriesRequest{
+		MerchantRef: "m-1",
+		PeriodFrom:  &timestamppb.Timestamp{Seconds: 253402300800},
+	})
+	require.Error(t, err, "метка за пределами диапазона protobuf")
+	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
+
+	_, err = server.ListEntries(ctx, &ledgerv1.ListEntriesRequest{
+		MerchantRef: "m-1",
+		PeriodFrom:  timestamppb.New(time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)),
+		PeriodTo:    timestamppb.New(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)),
+	})
+	require.Error(t, err)
+	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
+}
+
+func TestListMerchantAccountsValidation(t *testing.T) {
+	t.Parallel()
+
+	server := NewLedger(nil)
+	ctx := context.Background()
+
+	_, err := server.ListMerchantAccounts(ctx, &ledgerv1.ListMerchantAccountsRequest{})
+	require.Error(t, err)
+	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
+
+	_, err = server.ListMerchantAccounts(ctx, &ledgerv1.ListMerchantAccountsRequest{MerchantRef: "bad ref!"})
 	require.Error(t, err)
 	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
 }

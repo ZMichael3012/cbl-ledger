@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -213,16 +214,46 @@ func (s *Ledger) GetBalance(ctx context.Context, req *ledgerv1.GetBalanceRequest
 	}}, nil
 }
 
-// ListEntries возвращает страницу выписки счета по возрастанию entry_id.
+// ListEntries возвращает страницу выписки по счету или мерчанту (2.10).
+// Заполняется account_id или merchant_ref; merchant_ref ограничивает выписку
+// счетами мерчанта, период фильтрует created_at транзакции (from включительно,
+// to исключительно).
 func (s *Ledger) ListEntries(ctx context.Context, req *ledgerv1.ListEntriesRequest) (*ledgerv1.ListEntriesResponse, error) {
 	accountID := strings.TrimSpace(req.GetAccountId())
-	if _, err := uuid.Parse(accountID); err != nil {
-		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "invalid_account_id", "account_id не UUID", nil)
+	merchantRef := strings.TrimSpace(req.GetMerchantRef())
+	if accountID == "" && merchantRef == "" {
+		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "invalid_query", "нужен account_id или merchant_ref", nil)
+	}
+	if accountID != "" {
+		if _, err := uuid.Parse(accountID); err != nil {
+			return nil, grpcmw.E(grpcmw.KindInvalidArgument, "invalid_account_id", "account_id не UUID", nil)
+		}
+	}
+	if merchantRef != "" && !domain.ValidMerchantRef(merchantRef) {
+		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "invalid_query", "merchant_ref не соответствует плану счетов", nil)
 	}
 	if len(req.GetCursor()) > maxCursorLen {
 		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "cursor_too_long", "cursor длиннее предела", nil)
 	}
-	entries, nextCursor, err := s.svc.ListEntries(ctx, accountID, req.GetLimit(), req.GetCursor())
+	periodFrom, err := optionalTimestamp(req.GetPeriodFrom())
+	if err != nil {
+		return nil, err
+	}
+	periodTo, err := optionalTimestamp(req.GetPeriodTo())
+	if err != nil {
+		return nil, err
+	}
+	if periodFrom != nil && periodTo != nil && !periodTo.After(*periodFrom) {
+		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "invalid_period", "period_to должен быть позже period_from", nil)
+	}
+	entries, nextCursor, err := s.svc.ListEntries(ctx, usecase.ListEntriesFilter{
+		AccountID:   accountID,
+		MerchantRef: merchantRef,
+		PeriodFrom:  periodFrom,
+		PeriodTo:    periodTo,
+		Limit:       req.GetLimit(),
+		Cursor:      req.GetCursor(),
+	})
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -240,6 +271,47 @@ func (s *Ledger) ListEntries(ctx context.Context, req *ledgerv1.ListEntriesReque
 		})
 	}
 	return response, nil
+}
+
+// ListMerchantAccounts возвращает счета мерчанта с балансами (2.10):
+// предпосылка 7.4 для балансов и ownership счетов BFF.
+func (s *Ledger) ListMerchantAccounts(ctx context.Context, req *ledgerv1.ListMerchantAccountsRequest) (*ledgerv1.ListMerchantAccountsResponse, error) {
+	merchantRef := strings.TrimSpace(req.GetMerchantRef())
+	if merchantRef == "" {
+		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "missing_merchant_ref", "merchant_ref обязателен", nil)
+	}
+	if !domain.ValidMerchantRef(merchantRef) {
+		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "invalid_query", "merchant_ref не соответствует плану счетов", nil)
+	}
+	accounts, err := s.svc.ListMerchantAccounts(ctx, merchantRef)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	response := &ledgerv1.ListMerchantAccountsResponse{}
+	for _, account := range accounts {
+		response.Accounts = append(response.Accounts, &ledgerv1.MerchantAccount{
+			AccountId: account.AccountID,
+			Type:      account.Type,
+			Asset:     account.Asset,
+			Decimals:  decimalsToUint32(account.Decimals),
+			Available: moneyValue(account.Available, account.Asset, account.Decimals),
+			Reserved:  moneyValue(account.Reserved, account.Asset, account.Decimals),
+		})
+	}
+	return response, nil
+}
+
+// optionalTimestamp переводит необязательную временную границу запроса;
+// невалидная метка отклоняется единым кодом invalid_period.
+func optionalTimestamp(ts *timestamppb.Timestamp) (*time.Time, error) {
+	if ts == nil {
+		return nil, nil
+	}
+	if err := ts.CheckValid(); err != nil {
+		return nil, grpcmw.E(grpcmw.KindInvalidArgument, "invalid_period", "границы периода некорректны", nil)
+	}
+	value := ts.AsTime().UTC()
+	return &value, nil
 }
 
 // moneyValue собирает контрактную сумму с активом и decimals счета.
@@ -319,6 +391,10 @@ func mapError(err error) error {
 		return grpcmw.E(grpcmw.KindInvalidArgument, "asset_mismatch", "активы или decimals счетов различаются", nil)
 	case errors.Is(err, domain.ErrInvalidCursor):
 		return grpcmw.E(grpcmw.KindInvalidArgument, "invalid_cursor", "курсор выписки некорректен", nil)
+	case errors.Is(err, domain.ErrInvalidQuery):
+		return grpcmw.E(grpcmw.KindInvalidArgument, "invalid_query", "параметры выписки некорректны", nil)
+	case errors.Is(err, domain.ErrTooManyResults):
+		return grpcmw.E(grpcmw.KindResourceExhausted, "too_many_results", "превышен предел выдачи", nil)
 	case errors.Is(err, domain.ErrInvalidAccountPlan):
 		return grpcmw.E(grpcmw.KindFailedPrecondition, "invalid_account_plan", "ключ счета не соответствует плану счетов", nil)
 	case errors.Is(err, domain.ErrAccountConflict):

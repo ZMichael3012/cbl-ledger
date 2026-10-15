@@ -229,6 +229,59 @@ func TestIntegrationGrpcGetBalanceAndListEntries(t *testing.T) {
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
+// ensureAccount провижинит счет по бизнес-ключу в bufconn-сценариях 2.10.
+func ensureAccount(t *testing.T, repo *storage.Repository, key domain.AccountKey) storage.Account {
+	t.Helper()
+	account, err := repo.EnsureAccount(context.Background(), key)
+	require.NoError(t, err)
+	return account
+}
+
+func TestIntegrationGrpcMerchantScope(t *testing.T) {
+	client, db := setupLedgerServer(t)
+	repo := storage.NewRepository(db, zap.NewNop())
+	ctx := context.Background()
+
+	merchant := ensureAccount(t, repo, domain.MerchantAccountKey("m-grpc", "USDT", 2))
+	ensureAccount(t, repo, domain.PayoutAccountKey("m-grpc", "USDT", 2))
+	other := ensureAccount(t, repo, domain.MerchantAccountKey("m-other", "USDT", 2))
+	require.NoError(t, db.Model(&storage.Balance{}).
+		Where("account_id = ?", merchant.ID).
+		Update("available", 50_000).Error)
+
+	_, err := client.PostTransaction(ctx, &ledgerv1.PostTransactionRequest{
+		IdempotencyKey: "pay-1:completed",
+		RefType:        "payment",
+		RefId:          "pay-1",
+		Entries: []*ledgerv1.EntryInput{
+			entry(merchant.ID, commonv1.Direction_DIRECTION_DEBIT, 10_000),
+			entry(other.ID, commonv1.Direction_DIRECTION_CREDIT, 10_000),
+		},
+	})
+	require.NoError(t, err)
+
+	accounts, err := client.ListMerchantAccounts(ctx, &ledgerv1.ListMerchantAccountsRequest{MerchantRef: "m-grpc"})
+	require.NoError(t, err)
+	require.Len(t, accounts.GetAccounts(), 2, "только счета мерчанта")
+	listed := accounts.GetAccounts()[0]
+	assert.Equal(t, merchant.ID, listed.GetAccountId())
+	assert.Equal(t, "USDT", listed.GetAsset())
+	assert.Equal(t, int64(40_000), listed.GetAvailable().GetMinorUnits())
+	assert.Equal(t, "payout", accounts.GetAccounts()[1].GetType())
+
+	page, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{MerchantRef: "m-grpc"})
+	require.NoError(t, err)
+	require.Len(t, page.GetEntries(), 1)
+	assert.Equal(t, merchant.ID, page.GetEntries()[0].GetAccountId())
+
+	// Чужой счет под фильтром мерчанта - NotFound без раскрытия существования.
+	_, err = client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{MerchantRef: "m-grpc", AccountId: other.ID})
+	require.Equal(t, codes.NotFound, status.Code(err))
+
+	_, err = client.ListMerchantAccounts(ctx, &ledgerv1.ListMerchantAccountsRequest{MerchantRef: "bad ref!"})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
 func TestIntegrationGrpcReplayReturnsSnapshot(t *testing.T) {
 	client, db := setupLedgerServer(t)
 	merchant := seedGrpcAccount(t, db, "merchant", "USDT", 2, 50_000)

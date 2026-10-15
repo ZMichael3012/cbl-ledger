@@ -111,3 +111,17 @@ func TestCanonicalName(t *testing.T) {
 		"cbl:ledger:account:v1:clearing:USDT:2:",
 		domain.PlatformAccountKey(domain.AccountTypeClearing, "USDT", 2).CanonicalName())
 }
+
+func TestValidMerchantRef(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{"m-1", "merchant_01", "A", strings.Repeat("a", 128)}
+	for _, ref := range valid {
+		assert.True(t, domain.ValidMerchantRef(ref), "ссылка %q", ref)
+	}
+
+	invalid := []string{"", " ", "m 1", "m:1", "м-1", strings.Repeat("a", 129), "m\t1"}
+	for _, ref := range invalid {
+		assert.False(t, domain.ValidMerchantRef(ref), "ссылка %q", ref)
+	}
+}

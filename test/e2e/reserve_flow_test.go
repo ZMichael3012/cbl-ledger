@@ -17,7 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -268,4 +271,30 @@ func TestBalanceAndEntriesFlow(t *testing.T) {
 	assert.Equal(t, commonv1.Direction_DIRECTION_DEBIT, listed[1].GetDirection())
 	assert.Greater(t, listed[1].GetEntryId(), listed[0].GetEntryId())
 	assert.Equal(t, "payment", listed[2].GetRefType())
+
+	// 2.10: мерчантская выписка и список счетов с балансами (предпосылка 7.4).
+	scoped, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{MerchantRef: merchantRef})
+	require.NoError(t, err)
+	require.Len(t, scoped.GetEntries(), 3, "выписка мерчанта совпадает со счетной")
+	for _, listedEntry := range scoped.GetEntries() {
+		assert.Equal(t, merchant.ID, listedEntry.GetAccountId())
+	}
+
+	accounts, err := client.ListMerchantAccounts(ctx, &ledgerv1.ListMerchantAccountsRequest{MerchantRef: merchantRef})
+	require.NoError(t, err)
+	require.Len(t, accounts.GetAccounts(), 1)
+	assert.Equal(t, merchant.ID, accounts.GetAccounts()[0].GetAccountId())
+	assert.Equal(t, int64(35_000), accounts.GetAccounts()[0].GetAvailable().GetMinorUnits())
+
+	distant := timestamppb.New(time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC))
+	empty, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{MerchantRef: merchantRef, PeriodFrom: distant})
+	require.NoError(t, err)
+	assert.Empty(t, empty.GetEntries(), "за пределами периода проводок нет")
+
+	// Чужой merchant_ref со счетом этого мерчанта отвечает NotFound.
+	_, err = client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{
+		MerchantRef: "e2e-" + uuid.Must(uuid.NewV7()).String(),
+		AccountId:   merchant.ID,
+	})
+	require.Equal(t, codes.NotFound, status.Code(err))
 }

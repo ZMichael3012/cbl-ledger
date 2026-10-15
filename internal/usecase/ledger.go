@@ -4,6 +4,7 @@ package usecase
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -104,9 +105,39 @@ func (l *Ledger) GetBalance(ctx context.Context, accountID string) (storage.Acco
 	return l.repo.GetBalance(ctx, accountID)
 }
 
-// ListEntries возвращает страницу выписки счета с курсором продолжения.
-func (l *Ledger) ListEntries(ctx context.Context, accountID string, limit uint32, cursor string) ([]storage.EntryView, string, error) {
-	return l.repo.ListEntries(ctx, accountID, limit, cursor)
+// ListEntriesFilter описывает фильтр выписки BFF (2.10): заполняется AccountID
+// или MerchantRef (хотя бы одно); период применяется к created_at транзакции.
+type ListEntriesFilter struct {
+	// AccountID задает счет выписки; пусто при выписке по MerchantRef.
+	AccountID string
+	// MerchantRef задает фильтр счетов мерчанта (merchant и payout).
+	MerchantRef string
+	// PeriodFrom задает нижнюю границу периода включительно.
+	PeriodFrom *time.Time
+	// PeriodTo задает верхнюю границу периода исключительно.
+	PeriodTo *time.Time
+	// Limit задает размер страницы; 0 - серверный дефолт.
+	Limit uint32
+	// Cursor задает курсор продолжения.
+	Cursor string
+}
+
+// ListEntries возвращает страницу выписки по фильтру (счет, мерчант, период)
+// с курсором продолжения.
+func (l *Ledger) ListEntries(ctx context.Context, filter ListEntriesFilter) ([]storage.EntryView, string, error) {
+	return l.repo.ListEntries(ctx, storage.EntryFilter{
+		AccountID:   filter.AccountID,
+		MerchantRef: filter.MerchantRef,
+		PeriodFrom:  filter.PeriodFrom,
+		PeriodTo:    filter.PeriodTo,
+		Limit:       filter.Limit,
+		Cursor:      filter.Cursor,
+	})
+}
+
+// ListMerchantAccounts возвращает счета мерчанта с балансами для BFF-выписок.
+func (l *Ledger) ListMerchantAccounts(ctx context.Context, merchantRef string) ([]storage.MerchantAccountView, error) {
+	return l.repo.ListMerchantAccounts(ctx, merchantRef)
 }
 
 // EnsureAccount возвращает счет плана счетов по бизнес-ключу, создавая его

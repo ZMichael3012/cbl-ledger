@@ -17,7 +17,7 @@ Out of scope: другие сервисы платформы; взаимодей
 
 - REST: административный /healthz, /readyz
 - gRPC: сервер LedgerService (PostTransaction, Reserve, CommitReserve, ReleaseReserve,
-  GetBalance, ListEntries)
+  GetBalance, ListEntries с фильтром мерчанта и периода, ListMerchantAccounts - 2.10)
 - Kafka продюсирует: `ledger.events` (transaction.posted, reserve.created/committed/released;
   конверты через outbox, ключ - первая проводка по сортировке; CBL-003 раздел 6)
 - Kafka потребляет: `payment.events` (payment.completed -> Dr clearing / Cr merchant / Cr fee;
@@ -27,7 +27,8 @@ Out of scope: другие сервисы платформы; взаимодей
 - План счетов (2.6): `account_id` выводится детерминированно из бизнес-ключа
   (`CBL-003`, раздел 9, golden-векторы); провижининг - `EnsureAccount` (usecase/storage)
 
-Контракты заморожены в `cbl-protos` (CF-1 для gRPC, CF-2/CF-3 для событий), см. `CBL-004`.
+Контракты заморожены в `cbl-protos` (CF-1 gRPC, CF-2/CF-3 события; аддитивные
+поля BFF-выписок - `cbl-protos@cf-3.2`, CBL-2.10), см. `CBL-004`.
 
 ## 3. Архитектура
 
@@ -42,7 +43,7 @@ make build        # go build ./...
 make test         # go test ./...
 make test-integration  # integration (testcontainers), включая property-тесты инвариантов (2.8)
 make test-e2e     # сквозные сценарии резервов, выписки и consumer (Kafka+PG на testcontainers)
-make smoke        # compose-стенд: сборка, миграции до версии 8, топики, consumer, e2e
+make smoke        # compose-стенд: сборка, миграции до версии 9, топики, consumer, e2e
 make bench        # бенчмарки записи на testcontainers (CBL-2.9)
 make vet          # go vet ./...
 make lint         # golangci-lint в Docker
@@ -92,13 +93,14 @@ consumer lag; дашборды после задачи 0.7.
 | T-LED-08 | Handler consumer (2.7) не использует транзакцию Guard: проводка идемпотентна по бизнес-ключу `payment:{id}:completed`, inbox - второй барьер | нет пересмотра retry-контура 2.3; один компактный commit на событие | сбой между коммитами проводки и inbox безопасен (replay), но требует канонизации `payment_id` (реализовано) | конкурентные дубли подтверждены integration-тестом; события пишутся в outbox атомарно с проводкой |
 | T-LED-09 | Ключ партиции `ledger.events` - лексикографически минимальный account_id проводки | стабильная партиция события, дедуп по event_id в заголовке | события одного счета могут попасть в разные партиции (порядок не обещан); min-ключ тянет долю событий к платформенным счетам (clearing/fee) | потребители коррелируют по `ref_id`/`transaction_id`, а не по порядку; при необходимости ключ пересматривается в CF-2 |
 | T-LED-10 | Property-тесты без новых зависимостей: `testing/quick` для домена, детерминированный генератор на `math/rand/v2` для хранилища | нулевые зависимости, воспроизводимость по `PROPERTY_SEED`, проверка после каждой операции | ручной генератор, нет шринкинга, инварианты дублируют SQL-схему | независимость проверок подтверждена мутациями; локализация сбоя - стадия и сид; расширение `pgregory.net/rapid` - только при пересмотре в 14.x |
+| T-LED-11 | Мерчантские чтения (2.10) фильтруются `merchant_ref` в запросе вместо отдельного владельца-токена: BFF передает субъект токена, Ledger не аутентифицирует вызывающего (KI-ledger-02) | ownership и изоляция мерчантов без межсервисных таблиц; чужие/платформенные счета под фильтром отвечают NotFound без раскрытия существования | защита от подмены `merchant_ref` появляется только с mTLS/authN (0.6); до этого порт не публикуется вне доверенной сети | выписка без фильтра и по account_id остается внутренним вызовом; интеграционные тесты изоляции обязательны; доступ к платформенным счетам через мерчантский фильтр невозможен |
 
 ## 9. Known issues
 
 | ID | Проблема | Влияние | План | Статус |
 | :-- | :-- | :-- | :-- | :-- |
 | KI-ledger-01 | CI и pre-commit не настроены | линтеры запускаются вручную | задача 0.2 | open |
-| KI-ledger-02 | Нет mTLS и authN на gRPC LedgerService: запись, резервы, чтение балансов и полной выписки (с ref_id) любого счета; `account_id` выводится из публичных бизнес-ключей (2.6), т.е. не является capability; эквивалентный неаутентифицированный путь записи появился через Kafka: запись `payment.completed` в `payment.events` создает счета и кредит произвольного `merchant_id` | порт 9040 и Kafka-топики не публиковать за пределы доверенной сети; prod-выкладка запрещена; авторизацию привязывать к мерчанту, а не к знанию id | mTLS и авторизация до prod (0.6, 1.4); broker ACL/mTLS на запись в `payment.events` - задача 0.5; неймспейсинг ключей идемпотентности по мерчанту - вместе с authN | open |
+| KI-ledger-02 | Нет mTLS и authN на gRPC LedgerService: запись, резервы, чтение балансов и полной выписки (с ref_id) любого счета; `account_id` выводится из публичных бизнес-ключей (2.6), т.е. не является capability; с 2.10 добавлены чтения по `merchant_ref` - при доступе к порту подмена ссылки дает выписки и балансы любого мерчанта (T-LED-11); эквивалентный неаутентифицированный путь записи появился через Kafka: запись `payment.completed` в `payment.events` создает счета и кредит произвольного `merchant_id` | порт 9040 и Kafka-топики не публиковать за пределы доверенной сети; prod-выкладка запрещена; авторизацию привязывать к мерчанту, а не к знанию id | mTLS и авторизация до prod (0.6, 1.4); broker ACL/mTLS на запись в `payment.events` - задача 0.5; неймспейсинг ключей идемпотентности по мерчанту - вместе с authN | open |
 | KI-ledger-03 | Сценарии e2e в `test/e2e/` отсутствуют | шаг 8 выполнен частично: integration, smoke compose и k6-нагрузка (2.9, `test/load/`) есть; сценариев e2e нет | ЗАКРЫТ 14.10.2026: e2e compose-сценарий резервов `test/e2e/reserve_flow.ps1` + `make smoke` (Reserve/Commit/Release через реальный gRPC и PostgreSQL) | closed |
 | KI-ledger-04 | Race detector недоступен локально (нет CGO на Windows) | конкурентные тесты идут без -race | включить -race в CI (0.2) | open |
 | KI-ledger-05 | Функция `balances_non_negative()` (миграция 00005) не фиксирует `search_path` | низкое: подмена требует прав CREATE в схеме раньше public; 00006 захардена (`public.entries`, search_path) | применить hardening отдельной миграцией при плановом изменении 00005 | open |
@@ -119,7 +121,8 @@ consumer lag; дашборды после задачи 0.7.
 | CBL-2.5 | 2026-10-14 | done, ревью закрыто (GetBalance/ListEntries, миграция 00008, снимки balances_after, покрытие 87.3%) | `.specs/CBL-2.5-balance-queries.md` | 19ff6f5 |
 | CBL-2.6 | 2026-10-14 | done, ревью закрыто (детерминированные счета, EnsureAccount, golden-векторы, покрытие 87.6%) | `.specs/CBL-2.6-account-plan.md` | df71640 |
 | CBL-2.7 | 2026-10-14 | done, ревью закрыто (consumer payment.completed, ledger.events через outbox, kit-фикс DLQ, покрытие 87.3%) | `.specs/CBL-2.7-payment-consumer.md` | 594afeb |
-| CBL-2.8 | 2026-10-14 | done, ревью закрыто (property-тесты инвариантов с мутационной проверкой, покрытие 87.7%) | `.specs/CBL-2.8-property-tests.md` | этот коммит |
+| CBL-2.8 | 2026-10-14 | done, ревью закрыто (property-тесты инвариантов с мутационной проверкой, покрытие 87.7%) | `.specs/CBL-2.8-property-tests.md` | 2dba4a5 |
+| CBL-2.10 | 2026-10-15 | done, ревью закрыто (BFF-выписки: ListMerchantAccounts, merchant- и period-фильтры ListEntries, ownership fail-closed; контракт cf-3.2) | `.specs/CBL-2.10-ledger-bff-extension.md` | этот коммит |
 
 ## 11. Runbook
 
@@ -159,3 +162,15 @@ Consumer платежей и события (2.7):
    event_id с фикса CBL-1.3).
 3. Outbox lag: логи relay kit; неопубликованные строки лежат в таблице `outbox`
    (ретеншен - KI-ledger-09, 14.2); потери нет, возможны дубли (at-least-once).
+
+BFF-выписки (2.10):
+
+1. `invalid_query` (invalid_argument) на ListEntries: не заполнены ни
+   `account_id`, ни `merchant_ref`, либо `merchant_ref` не по плану счетов.
+2. `account_not_found` под фильтром мерчанта: счет чужой или платформенный
+   (clearing/fee/suspense); это ожидаемый fail-closed ответ, а не сбой.
+3. `invalid_period` (invalid_argument): `period_to` не позже `period_from` или
+   невалидная метка времени; проверить часы вызывающего (UTC).
+4. Пустой список ListMerchantAccounts: у мерчанта еще нет счетов плана (нет
+   проводок и резервов) - не ошибка; сверить expected `account_id` по
+   golden-векторам (KI-ledger-08).

@@ -34,4 +34,8 @@ var (
 	ErrInvalidAccountPlan = errors.New("ledger: invalid account plan key")
 	// ErrAccountConflict сообщает о существующем счете с другими характеристиками.
 	ErrAccountConflict = errors.New("ledger: account already exists with different parameters")
+	// ErrInvalidQuery сообщает о некорректных параметрах выписки или списка счетов.
+	ErrInvalidQuery = errors.New("ledger: invalid query")
+	// ErrTooManyResults сообщает о превышении серверного предела выдачи.
+	ErrTooManyResults = errors.New("ledger: too many results")
 )

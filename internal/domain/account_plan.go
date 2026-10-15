@@ -71,6 +71,12 @@ func MerchantAccountKey(merchantRef, asset string, decimals int32) AccountKey {
 	return AccountKey{Type: AccountTypeMerchant, Asset: asset, Decimals: decimals, MerchantRef: merchantRef}
 }
 
+// ValidMerchantRef сообщает, что ссылка на мерчанта допустима планом счетов;
+// используется транспортом для недоверенного ввода фильтров выписки.
+func ValidMerchantRef(ref string) bool {
+	return merchantRefPattern.MatchString(ref)
+}
+
 // PayoutAccountKey собирает ключ счета выплат мерчанта.
 func PayoutAccountKey(merchantRef, asset string, decimals int32) AccountKey {
 	return AccountKey{Type: AccountTypePayout, Asset: asset, Decimals: decimals, MerchantRef: merchantRef}
