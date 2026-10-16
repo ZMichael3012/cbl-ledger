@@ -1,3 +1,3 @@
-// Пакет domain содержит доменные модели, инварианты и правила сервиса ledger,
-// не зависящие от транспорта и хранилищ.
+// Package domain contains domain models, invariants and rules of the ledger service
+// that do not depend on transport or storage.
 package domain

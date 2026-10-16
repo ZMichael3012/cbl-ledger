@@ -20,18 +20,18 @@ import (
 	"github.com/cbl/cbl-ledger/internal/domain"
 )
 
-// RetryPolicy задает политику повторов при конкурентных конфликтах.
+// RetryPolicy sets the retry policy for concurrent conflicts.
 type RetryPolicy struct {
-	// MaxAttempts задает предельное число попыток проводки.
+	// MaxAttempts sets the maximum number of posting attempts.
 	MaxAttempts int
-	// BaseDelay задает базовую паузу между попытками.
+	// BaseDelay sets the base delay between attempts.
 	BaseDelay time.Duration
-	// MaxDelay задает потолок паузы между попытками.
+	// MaxDelay sets the delay ceiling between attempts.
 	MaxDelay time.Duration
 }
 
-// DefaultRetryPolicy возвращает политику повторов по умолчанию:
-// 8 попыток, база 5 мс, потолок 250 мс, суммарно не более ~1 с ожидания.
+// DefaultRetryPolicy returns the default retry policy:
+// 8 attempts, a base of 5 ms, a ceiling of 250 ms, at most ~1 s of total waiting.
 func DefaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{
 		MaxAttempts: 8,
@@ -40,13 +40,13 @@ func DefaultRetryPolicy() RetryPolicy {
 	}
 }
 
-// maxRetryAttemptsCeiling ограничивает кастомную политику сверху, чтобы долгоживущие
-// вызовы (например, consumer 2.7) не могли зациклиться на конфликтах.
+// maxRetryAttemptsCeiling bounds a custom policy from above so that long-lived
+// calls (for example, the 2.7 consumer) cannot loop on conflicts.
 const maxRetryAttemptsCeiling = 32
 
-// normalizeRetryPolicy заменяет невалидные поля политики значениями по умолчанию,
-// чтобы нулевое значение Repository работало без явной конфигурации.
-// Потолок ниже базовой паузы поднимается до нее, число попыток ограничено сверху.
+// normalizeRetryPolicy replaces invalid policy fields with default values so
+// that a zero-value Repository works without explicit configuration. A ceiling
+// below the base delay is raised to it, and the attempt count is bounded above.
 func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
 	defaults := DefaultRetryPolicy()
 	if policy.MaxAttempts <= 0 {
@@ -67,13 +67,13 @@ func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {
 	return policy
 }
 
-// nextDelay вычисляет паузу перед попыткой attempt по схеме полного jitter:
-// равномерное значение из [0, min(MaxDelay, BaseDelay << attempt)].
-// randN инжектируется для детерминированных тестов.
+// nextDelay computes the delay before attempt `attempt` with full jitter:
+// a uniform value from [0, min(MaxDelay, BaseDelay << attempt)].
+// randN is injected for deterministic tests.
 func (policy RetryPolicy) nextDelay(attempt int, randN func(int64) int64) time.Duration {
 	limit := policy.BaseDelay
 	for i := 0; i < attempt && limit < policy.MaxDelay; i++ {
-		// Удвоение только при заведомо безопасном значении: иначе переполнение int64.
+		// Doubling only for a definitely safe value: otherwise int64 overflow.
 		if limit > policy.MaxDelay/2 {
 			limit = policy.MaxDelay
 			break
@@ -93,35 +93,35 @@ func (policy RetryPolicy) nextDelay(attempt int, randN func(int64) int64) time.D
 	return time.Duration(randN(bound))
 }
 
-// RetryEvent описывает один повтор проводки для наблюдателей.
+// RetryEvent describes a single posting retry for observers.
 type RetryEvent struct {
-	// Attempt задает номер повторяемой попытки, начиная с 1.
+	// Attempt sets the number of the retried attempt, starting from 1.
 	Attempt int
-	// Cause задает причину повтора: lock_conflict, idempotency_race, deadlock или unknown.
+	// Cause sets the retry cause: lock_conflict, idempotency_race, deadlock, or unknown.
 	Cause string
-	// Delay задает паузу перед следующей попыткой.
+	// Delay sets the pause before the next attempt.
 	Delay time.Duration
 }
 
-// RetryObserver получает события повторов; вызывается перед паузой.
-// Может вызываться конкурентно из нескольких горутин и не должен паниковать:
-// паника наблюдателя уронила бы обработку запроса.
+// RetryObserver receives retry events; it is called before the pause.
+// It may be called concurrently from multiple goroutines and must not panic:
+// a panic in the observer would bring down request processing.
 type RetryObserver func(RetryEvent)
 
-// Option настраивает Repository.
+// Option configures the Repository.
 type Option func(*Repository)
 
-// WithRetryPolicy задает политику повторов вместо политики по умолчанию.
+// WithRetryPolicy sets the retry policy instead of the default one.
 func WithRetryPolicy(policy RetryPolicy) Option {
 	return func(r *Repository) { r.retryPolicy = policy }
 }
 
-// WithRetryObserver подключает наблюдателя повторов (лог, метрики).
+// WithRetryObserver attaches a retry observer (log, metrics).
 func WithRetryObserver(observer RetryObserver) Option {
 	return func(r *Repository) { r.retryObserver = observer }
 }
 
-// retryCause классифицирует причину повтора для наблюдателей.
+// retryCause classifies the retry cause for observers.
 func retryCause(err error) string {
 	switch {
 	case errors.Is(err, errLockConflict):
@@ -138,45 +138,45 @@ func retryCause(err error) string {
 	return "unknown"
 }
 
-// restrictedAccountTypes задает типы счетов, где отрицательный баланс запрещен.
-// Транзитные счета (clearing, fee, suspense) могут уходить в минус до клиринга.
+// restrictedAccountTypes sets the account types where a negative balance is
+// forbidden. Transit accounts (clearing, fee, suspense) may go negative until clearing.
 var restrictedAccountTypes = map[string]struct{}{
 	string(domain.AccountTypeMerchant): {},
 	string(domain.AccountTypePayout):   {},
 }
 
 var (
-	// errLockConflict сообщает о проигранной гонке за lock_version баланса.
+	// errLockConflict reports a lost race for the balance lock_version.
 	errLockConflict = errors.New("storage: balance lock conflict")
-	// errIdempotentRace сообщает о конкурентной вставке того же idempotency_key.
+	// errIdempotentRace reports a concurrent insert of the same idempotency_key.
 	errIdempotentRace = errors.New("storage: idempotency race")
 )
 
-// BalanceSnapshot описывает остаток счета после проводки.
+// BalanceSnapshot describes the account balance after the posting.
 type BalanceSnapshot struct {
-	// AccountID задает счет.
+	// AccountID sets the account.
 	AccountID string
-	// Asset задает код актива счета.
+	// Asset sets the account asset code.
 	Asset string
-	// Decimals задает количество знаков после точки.
+	// Decimals sets the number of decimal places.
 	Decimals int32
-	// Available задает доступный остаток.
+	// Available sets the available balance.
 	Available int64
-	// Reserved задает зарезервированный остаток.
+	// Reserved sets the reserved balance.
 	Reserved int64
 }
 
-// PostTransactionResult описывает результат проводки.
+// PostTransactionResult describes the result of a posting.
 type PostTransactionResult struct {
-	// TransactionID задает идентификатор транзакции.
+	// TransactionID sets the transaction identifier.
 	TransactionID string
-	// Balances задает остатки счетов после проводки.
+	// Balances sets the account balances after the posting.
 	Balances []BalanceSnapshot
-	// Replayed сообщает, что результат возвращен по повторному ключу идемпотентности.
+	// Replayed reports that the result was returned for a repeated idempotency key.
 	Replayed bool
 }
 
-// Repository выполняет транзакции двойной записи в PostgreSQL.
+// Repository performs double-entry transactions in PostgreSQL.
 type Repository struct {
 	db            *gorm.DB
 	log           *zap.Logger
@@ -185,7 +185,7 @@ type Repository struct {
 	eventSink     TxnEventSink
 }
 
-// NewRepository создает Repository; опции настраивают политику и наблюдателя повторов.
+// NewRepository creates a Repository; options configure the retry policy and observer.
 func NewRepository(db *gorm.DB, log *zap.Logger, opts ...Option) *Repository {
 	if log == nil {
 		log = zap.NewNop()
@@ -197,9 +197,9 @@ func NewRepository(db *gorm.DB, log *zap.Logger, opts ...Option) *Repository {
 	return repository
 }
 
-// PostTransaction выполняет сбалансированную проводку с идемпотентностью по ключу
-// и оптимистичной блокировкой балансов; при конфликтах повторяет согласно политике
-// (полный jitter, потолок паузы). Повтор ключа с другим телом отклоняется ErrIdempotencyReuse.
+// PostTransaction performs a balanced posting with key idempotency and optimistic
+// balance locking; on conflicts it retries according to the policy (full jitter,
+// delay ceiling). Reusing a key with a different body is rejected with ErrIdempotencyReuse.
 func (r *Repository) PostTransaction(ctx context.Context, idempotencyKey, refType, refID string, entries []domain.EntryInput) (PostTransactionResult, error) {
 	if strings.TrimSpace(idempotencyKey) == "" {
 		return PostTransactionResult{}, fmt.Errorf("%w: empty idempotency_key", domain.ErrInvalidTransaction)
@@ -227,8 +227,8 @@ func (r *Repository) PostTransaction(ctx context.Context, idempotencyKey, refTyp
 		if attempt == policy.MaxAttempts-1 {
 			break
 		}
-		// Полный jitter снижает синхронные повторные столкновения; криптостойкость не нужна.
-		delay := policy.nextDelay(attempt, rand.Int64N) //nolint:gosec // G404: jitter, не криптография
+		// Full jitter reduces synchronized repeated collisions; cryptographic strength is not needed.
+		delay := policy.nextDelay(attempt, rand.Int64N) //nolint:gosec // G404: jitter, not cryptography
 		if r.retryObserver != nil {
 			r.retryObserver(RetryEvent{Attempt: attempt + 1, Cause: retryCause(err), Delay: delay})
 		}
@@ -243,8 +243,9 @@ func (r *Repository) PostTransaction(ctx context.Context, idempotencyKey, refTyp
 	return PostTransactionResult{}, fmt.Errorf("%w: exceeded %d attempts: %w", domain.ErrConflict, policy.MaxAttempts, lastErr)
 }
 
-// normalizeEntries приводит идентификаторы счетов к каноническому виду UUID.
-// Без нормализации UUID в другом регистре не совпал бы с ключом загруженных счетов.
+// normalizeEntries brings account identifiers to the canonical UUID form.
+// Without normalization, a UUID in a different case would not match the key
+// of the loaded accounts.
 func normalizeEntries(entries []domain.EntryInput) ([]domain.EntryInput, error) {
 	normalized := make([]domain.EntryInput, len(entries))
 	for i := range entries {
@@ -261,9 +262,9 @@ func normalizeEntries(entries []domain.EntryInput) ([]domain.EntryInput, error) 
 	return normalized, nil
 }
 
-// requestHash вычисляет канонический хэш тела запроса для контроля повтора ключа.
-// Строки кодируются с префиксом длины, чтобы разделители внутри значений
-// не создавали разные тела с одинаковым хэшем.
+// requestHash computes the canonical hash of the request body for key reuse control.
+// Strings are encoded with a length prefix so that separators inside values do not
+// create different bodies with the same hash.
 func requestHash(refType, refID string, entries []domain.EntryInput) string {
 	digest := sha256.New()
 	_, _ = fmt.Fprintf(digest, "%d:%s|%d:%s|%d:", len(refType), refType, len(refID), refID, len(entries))
@@ -274,7 +275,7 @@ func requestHash(refType, refID string, entries []domain.EntryInput) string {
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
-// isRetryable сообщает, что ошибку следует повторить: конфликт версии, гонка ключа или deadlock.
+// isRetryable reports that the error should be retried: a version conflict, a key race, or a deadlock.
 func isRetryable(err error) bool {
 	if errors.Is(err, errLockConflict) || errors.Is(err, errIdempotentRace) {
 		return true
@@ -283,7 +284,7 @@ func isRetryable(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "40P01"
 }
 
-// postOnce выполняет одну попытку проводки в транзакции базы.
+// postOnce performs a single posting attempt in a database transaction.
 func (r *Repository) postOnce(ctx context.Context, idempotencyKey, refType, refID string, entries []domain.EntryInput, hash string) (PostTransactionResult, error) {
 	var result PostTransactionResult
 	txID, err := uuid.NewV7()
@@ -322,11 +323,11 @@ func (r *Repository) postOnce(ctx context.Context, idempotencyKey, refType, refI
 			}
 		}
 
-		// Балансы обновляются до вставки проводок и в детерминированном порядке:
-		// CAS удерживает блокировку строки до коммита, поэтому идентификаторы
-		// проводок выписываются в порядке коммитов по счету (курсорная пагинация
-		// 2.5 не пропускает записи), а встречные транзакции двух счетов не дают
-		// deadlock 40P01.
+		// Balances are updated before the entries are inserted and in a deterministic
+		// order: CAS holds the row lock until commit, so entry identifiers are issued
+		// in the order of commits per account (the 2.5 cursor pagination does not skip
+		// records), and opposite transactions of two accounts do not produce a 40P01
+		// deadlock.
 		accountIDs := make([]string, 0, len(deltas))
 		for accountID := range deltas {
 			accountIDs = append(accountIDs, accountID)
@@ -370,8 +371,8 @@ func (r *Repository) postOnce(ctx context.Context, idempotencyKey, refType, refI
 			}
 		}
 
-		// Снимок балансов пишется вместе с проводкой: повтор по ключу обязан
-		// вернуть balances_after на момент первой проводки (CBL-2.5).
+		// The balance snapshot is written together with the posting: a key replay
+		// must return balances_after as of the first posting (CBL-2.5).
 		snapshotRows := make([]TransactionBalance, 0, len(snapshots))
 		for _, snapshot := range snapshots {
 			snapshotRows = append(snapshotRows, TransactionBalance{
@@ -385,8 +386,8 @@ func (r *Repository) postOnce(ctx context.Context, idempotencyKey, refType, refI
 		if err := tx.Create(&snapshotRows).Error; err != nil {
 			return fmt.Errorf("storage: insert transaction balances: %w", err)
 		}
-		// Событие пишется в ту же транзакцию: публикация через outbox атомарна
-		// с проводкой (CBL-000, инвариант 6).
+		// The event is written in the same transaction: publication through the
+		// outbox is atomic with the posting (CBL-000, invariant 6).
 		eventEntries := make([]TxnEventEntry, 0, len(entries))
 		for i := range entries {
 			account := accounts[entries[i].AccountID]
@@ -418,14 +419,14 @@ func (r *Repository) postOnce(ctx context.Context, idempotencyKey, refType, refI
 	return result, nil
 }
 
-// findTransaction ищет транзакцию по ключу идемпотентности.
+// findTransaction looks up a transaction by idempotency key.
 func findTransaction(tx *gorm.DB, idempotencyKey string) (Transaction, error) {
 	var transaction Transaction
 	err := tx.Where("idempotency_key = ?", idempotencyKey).First(&transaction).Error
 	return transaction, err
 }
 
-// loadAccounts загружает счета проводок и проверяет единство актива и decimals.
+// loadAccounts loads the posting accounts and checks the unity of asset and decimals.
 func loadAccounts(tx *gorm.DB, entries []domain.EntryInput) (map[string]*Account, error) {
 	seen := make(map[string]struct{}, len(entries))
 	ids := make([]string, 0, len(entries))
@@ -455,8 +456,8 @@ func loadAccounts(tx *gorm.DB, entries []domain.EntryInput) (map[string]*Account
 	return byID, nil
 }
 
-// applyDelta обновляет баланс счета с проверкой lock_version, переполнения
-// и нехватки средств для счетов с запретом отрицательного баланса.
+// applyDelta updates the account balance with checks of lock_version, overflow,
+// and insufficient funds for accounts where a negative balance is forbidden.
 func applyDelta(tx *gorm.DB, account *Account, delta int64) (BalanceSnapshot, error) {
 	var balance Balance
 	err := tx.Where("account_id = ?", account.ID).First(&balance).Error
@@ -498,9 +499,9 @@ func applyDelta(tx *gorm.DB, account *Account, delta int64) (BalanceSnapshot, er
 	}, nil
 }
 
-// loadResult собирает результат существующей транзакции для повтора по ключу.
-// Приоритет - снимок balances_after (CBL-2.5); для транзакций до миграции 00008
-// (dev-данные) используется прежнее чтение текущих балансов.
+// loadResult assembles the result of an existing transaction for a key replay.
+// The balances_after snapshot has priority (CBL-2.5); for transactions predating
+// migration 00008 (dev data), the previous reading of current balances is used.
 func loadResult(tx *gorm.DB, transaction Transaction) (PostTransactionResult, error) {
 	var snapshotRows []TransactionBalance
 	if err := tx.Where("transaction_id = ?", transaction.ID).Find(&snapshotRows).Error; err != nil {
@@ -574,7 +575,7 @@ func loadResult(tx *gorm.DB, transaction Transaction) (PostTransactionResult, er
 	return PostTransactionResult{TransactionID: transaction.ID, Balances: snapshots}, nil
 }
 
-// isUniqueViolation проверяет код 23505 уникального ограничения PostgreSQL.
+// isUniqueViolation checks the PostgreSQL unique constraint code 23505.
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"

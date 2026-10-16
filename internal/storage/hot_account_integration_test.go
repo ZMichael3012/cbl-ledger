@@ -18,23 +18,23 @@ import (
 	"github.com/cbl/cbl-ledger/internal/storage"
 )
 
-// hotAmount задает сумму каждой проводки в тестах горячего счета.
+// hotAmount sets the amount of each entry in the hot-account tests.
 const hotAmount int64 = 7
 
-// retryCollector собирает события повторов из observer в потоках.
+// retryCollector collects retry events from the observer across goroutines.
 type retryCollector struct {
 	mu     sync.Mutex
 	events []storage.RetryEvent
 }
 
-// observe добавляет событие в коллекцию; безопасен для конкурентных вызовов.
+// observe appends an event to the collection; it is safe for concurrent calls.
 func (c *retryCollector) observe(event storage.RetryEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.events = append(c.events, event)
 }
 
-// snapshot возвращает копию собранных событий.
+// snapshot returns a copy of the collected events.
 func (c *retryCollector) snapshot() []storage.RetryEvent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -89,8 +89,8 @@ func TestIntegrationHotAccountContention(t *testing.T) {
 	var merchantBalance, feeBalance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&merchantBalance).Error)
 	require.NoError(t, db.Where("account_id = ?", fee.ID).First(&feeBalance).Error)
-	assert.Equal(t, int64(1_000_000)-applied, merchantBalance.Available, "потерянных обновлений нет")
-	assert.Equal(t, applied, feeBalance.Available, "деньги сохраняются между счетами")
+	assert.Equal(t, int64(1_000_000)-applied, merchantBalance.Available, "no lost updates")
+	assert.Equal(t, applied, feeBalance.Available, "money is conserved between accounts")
 
 	var transactions, entries int64
 	require.NoError(t, db.Model(&storage.Transaction{}).Count(&transactions).Error)
@@ -99,7 +99,7 @@ func TestIntegrationHotAccountContention(t *testing.T) {
 	assert.Equal(t, int64(2*successes), entries)
 
 	events := collector.snapshot()
-	require.NotEmpty(t, events, "конкуренция на горячем счете обязана приводить к повторам")
+	require.NotEmpty(t, events, "contention on a hot account must lead to retries")
 	for _, event := range events {
 		assert.GreaterOrEqual(t, event.Attempt, 1)
 		assert.NotEmpty(t, event.Cause)
@@ -144,22 +144,23 @@ func TestIntegrationRetryExhaustionDeterministic(t *testing.T) {
 	case err := <-results:
 		require.ErrorIs(t, err, domain.ErrConflict)
 	case <-time.After(10 * time.Second):
-		t.Fatal("проводка не завершилась после снятия блокировки")
+		t.Fatal("the transaction did not finish after the lock was released")
 	}
 
 	var transactions, entries int64
 	require.NoError(t, db.Model(&storage.Transaction{}).Count(&transactions).Error)
 	require.NoError(t, db.Model(&storage.Entry{}).Count(&entries).Error)
-	assert.Zero(t, transactions, "исчерпание повторов не оставляет транзакций")
+	assert.Zero(t, transactions, "retry exhaustion leaves no transactions")
 	assert.Zero(t, entries)
 
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)
-	assert.Equal(t, int64(1_000), balance.Available, "средства не списаны")
+	assert.Equal(t, int64(1_000), balance.Available, "funds are not debited")
 }
 
-// waitForBlockedUpdate ждет появления UPDATE, ожидающего блокировку строки баланса:
-// так тест детерминированно фиксирует момент, когда проводка уперлась в чужой лок.
+// waitForBlockedUpdate waits for an UPDATE that is waiting on the balance row lock:
+// this way the test deterministically captures the moment when the transaction hit
+// a foreign lock.
 func waitForBlockedUpdate(t testing.TB, db *gorm.DB) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -172,7 +173,7 @@ func waitForBlockedUpdate(t testing.TB, db *gorm.DB) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("проводка не встала в ожидание блокировки строки баланса")
+	t.Fatal("the transaction did not start waiting for the balance row lock")
 }
 
 func BenchmarkPostTransactionHotAccount(b *testing.B) {

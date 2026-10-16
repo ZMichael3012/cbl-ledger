@@ -1,8 +1,8 @@
 //go:build e2e
 
-// Пакет e2e содержит сквозной сценарий consumer леджера: событие
-// payment.completed из Kafka превращается в проводку в PostgreSQL, а конверт
-// ledger.events публикуется обратно в Kafka. Стенд: реальные Kafka и PostgreSQL.
+// Package e2e contains the end-to-end scenario of the ledger consumer: a
+// payment.completed event from Kafka turns into an entry in PostgreSQL, and the
+// ledger.events envelope is published back to Kafka. Stand: real Kafka and PostgreSQL.
 package e2e
 
 import (
@@ -40,7 +40,7 @@ import (
 	"github.com/cbl/cbl-ledger/internal/usecase"
 )
 
-// Топики стенда: вход consumer и выход продюсера.
+// Stand topics: the consumer input and the producer output.
 const (
 	paymentTopic = usecase.TopicPaymentEvents
 	ledgerTopic  = usecase.TopicLedgerEvents
@@ -162,7 +162,7 @@ func TestPaymentConsumerKafkaFlow(t *testing.T) {
 	defer producer.Close()
 	require.NoError(t, producer.ProduceSync(ctx, record).FirstErr())
 
-	// Ждем конверт ledger.events в Kafka.
+	// Waiting for the ledger.events envelope in Kafka.
 	envelope := pollEnvelope(t, ctx, consumerClient, ledgerTopic)
 	assert.Equal(t, storage.EventTransactionPosted, headerValue(envelope, outbox.HeaderEventType))
 	assert.Equal(t, usecase.ProducerLedger, headerValue(envelope, outbox.HeaderProducer))
@@ -178,19 +178,19 @@ func TestPaymentConsumerKafkaFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(98_000), balance.Available)
 
-	// Дубликат события не создает вторую проводку.
+	// A duplicate event does not create a second entry.
 	require.NoError(t, producer.ProduceSync(ctx, record).FirstErr())
 	time.Sleep(2 * time.Second)
 	var transactions int64
 	require.NoError(t, db.Model(&storage.Transaction{}).Count(&transactions).Error)
-	assert.Equal(t, int64(1), transactions, "inbox и бизнес-ключ защищают от дублей")
+	assert.Equal(t, int64(1), transactions, "the inbox and the business key protect against duplicates")
 
 	var outboxRows int64
 	require.NoError(t, db.Model(&outbox.Record{}).Count(&outboxRows).Error)
 	assert.Equal(t, int64(1), outboxRows)
 }
 
-// headerValue возвращает значение заголовка Kafka-записи.
+// headerValue returns the value of a Kafka record header.
 func headerValue(record *kgo.Record, key string) string {
 	for _, header := range record.Headers {
 		if header.Key == key {
@@ -200,7 +200,7 @@ func headerValue(record *kgo.Record, key string) string {
 	return ""
 }
 
-// pollEnvelope ждет первое сообщение топика или падает по таймауту контекста.
+// pollEnvelope waits for the first message in the topic or fails on the context timeout.
 func pollEnvelope(t *testing.T, ctx context.Context, client *kgo.Client, topic string) *kgo.Record {
 	t.Helper()
 	var found *kgo.Record

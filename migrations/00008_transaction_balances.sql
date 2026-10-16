@@ -1,7 +1,7 @@
 -- +goose Up
--- Снимки балансов после проводки: повтор PostTransaction по ключу идемпотентности
--- возвращает balances_after на момент первой проводки, а не текущее состояние счетов (2.5).
--- created_at готовит партиционирование по времени (обслуживание таблицы - 14.2).
+-- Balance snapshots after the entry: a repeated PostTransaction by idempotency key
+-- returns balances_after as of the first posting, not the current account state (2.5).
+-- created_at prepares time-based partitioning (table maintenance - 14.2).
 CREATE TABLE transaction_balances (
     transaction_id uuid        NOT NULL REFERENCES transactions (id),
     account_id     uuid        NOT NULL REFERENCES accounts (id),
@@ -11,8 +11,8 @@ CREATE TABLE transaction_balances (
     PRIMARY KEY (transaction_id, account_id)
 );
 
--- Индекс выписки: ORDER BY entry_id при фильтре по счету не обслуживается
--- entries_account_idx (account_id, created_at, id) - третий столбец не дает порядок.
+-- Statement index: ORDER BY entry_id with an account filter is not served by
+-- entries_account_idx (account_id, created_at, id) - the third column gives no ordering.
 CREATE INDEX entries_account_id_idx ON entries (account_id, id);
 
 -- +goose Down

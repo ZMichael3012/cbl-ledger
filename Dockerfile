@@ -1,5 +1,5 @@
-# Контекст сборки: каталог services/ (нужен для replace на ../cbl-kit и ../cbl-protos).
-# Сборка: docker build -f cbl-ledger/Dockerfile -t cbl/ledger:dev .
+# Build context: the services/ directory (needed for replace to ../cbl-kit and ../cbl-protos).
+# Build: docker build -f cbl-ledger/Dockerfile -t cbl/ledger:dev .
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY cbl-kit/ /src/cbl-kit/

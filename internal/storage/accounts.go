@@ -12,10 +12,10 @@ import (
 	"github.com/cbl/cbl-ledger/internal/domain"
 )
 
-// EnsureAccount возвращает счет по бизнес-ключу плана счетов, создавая его с
-// детерминированным идентификатором (ADR-2.6) и нулевым балансом при отсутствии.
-// Повторный и конкурентный вызовы идемпотентны; расхождение decimals с существующим
-// счетом отклоняется ErrAccountConflict.
+// EnsureAccount returns an account by the account plan business key, creating
+// it with a deterministic identifier (ADR-2.6) and a zero balance when missing.
+// Repeated and concurrent calls are idempotent; a decimals mismatch with an
+// existing account is rejected with ErrAccountConflict.
 func (r *Repository) EnsureAccount(ctx context.Context, key domain.AccountKey) (Account, error) {
 	if err := key.Validate(); err != nil {
 		return Account{}, err
@@ -35,11 +35,12 @@ func (r *Repository) EnsureAccount(ctx context.Context, key domain.AccountKey) (
 	return account, nil
 }
 
-// ensureAccountTx возвращает счет по бизнес-ключу в текущей транзакции, создавая его
-// идемпотентно; ON CONFLICT закрывает гонку параллельных создателей, после чего строка
-// перечитывается по ключу - победившая вставка (в том числе legacy со случайным id)
-// определяет канонический счет и балансовый ряд. Баланс лечится только у счетов без
-// проводок: нулевой ряд рядом с существующими entries маскировал бы порчу данных.
+// ensureAccountTx returns an account by business key in the current transaction,
+// creating it idempotently; ON CONFLICT closes the race between parallel creators,
+// after which the row is re-read by key - the winning insert (including a legacy
+// one with a random id) determines the canonical account and balance row. The
+// balance is healed only for accounts without entries: a zero row next to
+// existing entries would mask data corruption.
 func ensureAccountTx(tx *gorm.DB, key domain.AccountKey) (Account, error) {
 	account, err := findAccountByKey(tx, key)
 	if err == nil {
@@ -75,8 +76,9 @@ func ensureAccountTx(tx *gorm.DB, key domain.AccountKey) (Account, error) {
 		return Account{}, fmt.Errorf("storage: insert %s account: %w", key.Type, err)
 	}
 
-	// Строку мог создать конкурент (или конфликт погасил вставку legacy-ключом):
-	// каноническим считается то, что лежит в БД, а не выведенный идентификатор.
+	// The row could have been created by a concurrent creator (or the conflict
+	// suppressed the insert by a legacy key): the canonical account is the one
+	// stored in the DB, not the derived identifier.
 	stored, err := findAccountByKey(tx, key)
 	if err != nil {
 		return Account{}, fmt.Errorf("storage: load %s account after insert: %w", key.Type, err)
@@ -91,7 +93,7 @@ func ensureAccountTx(tx *gorm.DB, key domain.AccountKey) (Account, error) {
 	return stored, nil
 }
 
-// findAccountByKey ищет счет по бизнес-ключу плана счетов.
+// findAccountByKey looks up an account by the account plan business key.
 func findAccountByKey(tx *gorm.DB, key domain.AccountKey) (Account, error) {
 	var account Account
 	err := tx.Where("type = ? AND asset = ? AND COALESCE(merchant_ref, '') = ?",
@@ -99,9 +101,9 @@ func findAccountByKey(tx *gorm.DB, key domain.AccountKey) (Account, error) {
 	return account, err
 }
 
-// ensureBalanceRow создает балансовый ряд счета с нулем, если его нет. Счет с
-// проводками, но без балансового ряда - порча данных: провижининг не маскирует
-// ее нулем, а отдает ErrUnknownAccount (как loadBalance).
+// ensureBalanceRow creates a zero balance row for an account if missing. An
+// account with entries but without a balance row is data corruption: provisioning
+// does not mask it with a zero row but returns ErrUnknownAccount (like loadBalance).
 func ensureBalanceRow(tx *gorm.DB, accountID string) error {
 	var balance Balance
 	err := tx.Where("account_id = ?", accountID).First(&balance).Error

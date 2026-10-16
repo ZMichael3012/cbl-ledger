@@ -80,8 +80,8 @@ func setupLedgerServer(t *testing.T) (ledgerv1.LedgerServiceClient, *gorm.DB) {
 	return ledgerv1.NewLedgerServiceClient(conn), db
 }
 
-// seedGrpcAccount провижинит счет через план счетов (CBL-2.6) и фондирует баланс:
-// bufconn-сценарии работают только со счетами штатного провижининга.
+// seedGrpcAccount provisions an account through the account plan (CBL-2.6) and funds the balance:
+// bufconn scenarios work only with accounts of the standard provisioning.
 func seedGrpcAccount(t *testing.T, db *gorm.DB, accountType, asset string, decimals int32, initial int64) storage.Account {
 	t.Helper()
 	var key domain.AccountKey
@@ -111,7 +111,7 @@ func TestIntegrationGrpcProvisionedAccountPlan(t *testing.T) {
 
 	derived, err := domain.DeriveAccountID(domain.MerchantAccountKey(*merchant.MerchantRef, "USDT", 2))
 	require.NoError(t, err)
-	assert.Equal(t, derived.String(), merchant.ID, "getId выведен по плану счетов")
+	assert.Equal(t, derived.String(), merchant.ID, "getId is derived by the account plan")
 
 	balance, err := client.GetBalance(ctx, &ledgerv1.GetBalanceRequest{AccountId: merchant.ID})
 	require.NoError(t, err)
@@ -229,7 +229,7 @@ func TestIntegrationGrpcGetBalanceAndListEntries(t *testing.T) {
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
-// ensureAccount провижинит счет по бизнес-ключу в bufconn-сценариях 2.10.
+// ensureAccount provisions an account by business key in the bufconn scenarios 2.10.
 func ensureAccount(t *testing.T, repo *storage.Repository, key domain.AccountKey) storage.Account {
 	t.Helper()
 	account, err := repo.EnsureAccount(context.Background(), key)
@@ -262,7 +262,7 @@ func TestIntegrationGrpcMerchantScope(t *testing.T) {
 
 	accounts, err := client.ListMerchantAccounts(ctx, &ledgerv1.ListMerchantAccountsRequest{MerchantRef: "m-grpc"})
 	require.NoError(t, err)
-	require.Len(t, accounts.GetAccounts(), 2, "только счета мерчанта")
+	require.Len(t, accounts.GetAccounts(), 2, "only merchant accounts")
 	listed := accounts.GetAccounts()[0]
 	assert.Equal(t, merchant.ID, listed.GetAccountId())
 	assert.Equal(t, "USDT", listed.GetAsset())
@@ -274,7 +274,7 @@ func TestIntegrationGrpcMerchantScope(t *testing.T) {
 	require.Len(t, page.GetEntries(), 1)
 	assert.Equal(t, merchant.ID, page.GetEntries()[0].GetAccountId())
 
-	// Чужой счет под фильтром мерчанта - NotFound без раскрытия существования.
+	// A foreign account under the merchant filter is NotFound without revealing its existence.
 	_, err = client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{MerchantRef: "m-grpc", AccountId: other.ID})
 	require.Equal(t, codes.NotFound, status.Code(err))
 
@@ -314,7 +314,7 @@ func TestIntegrationGrpcReplayReturnsSnapshot(t *testing.T) {
 	for _, balance := range replay.GetBalancesAfter() {
 		if balance.GetAccountId() == merchant.ID {
 			assert.Equal(t, int64(40_000), balance.GetAvailable().GetMinorUnits(),
-				"повтор возвращает снимок на момент первой проводки")
+				"a retry returns the snapshot as of the first posting")
 		}
 	}
 }
@@ -393,7 +393,7 @@ func TestIntegrationGrpcReserveCommitRelease(t *testing.T) {
 	assert.Equal(t, ledgerv1.ReserveStatus_RESERVE_STATUS_RELEASED, released.GetStatus())
 
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)
-	assert.Equal(t, int64(60_000), balance.Available, "возврат резерва восстановил доступный баланс")
+	assert.Equal(t, int64(60_000), balance.Available, "the reserve release restored the available balance")
 }
 
 func TestIntegrationGrpcReserveErrorCodes(t *testing.T) {
@@ -408,7 +408,7 @@ func TestIntegrationGrpcReserveErrorCodes(t *testing.T) {
 		Amount:         reserveMoney(100_000),
 		RefId:          "payout-1",
 	})
-	require.Equal(t, codes.FailedPrecondition, status.Code(err), "нехватка средств")
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "insufficient funds")
 
 	_, err = client.Reserve(ctx, &ledgerv1.ReserveRequest{
 		IdempotencyKey: "payout-2:reserve",
@@ -416,13 +416,13 @@ func TestIntegrationGrpcReserveErrorCodes(t *testing.T) {
 		Amount:         reserveMoney(100),
 		RefId:          "payout-2",
 	})
-	require.Equal(t, codes.FailedPrecondition, status.Code(err), "резерв на транзитном счете запрещен")
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "a reserve on a transit account is forbidden")
 
 	_, err = client.CommitReserve(ctx, &ledgerv1.CommitReserveRequest{
 		IdempotencyKey: "payout-3:commit",
 		ReserveId:      uuid.Must(uuid.NewV7()).String(),
 	})
-	require.Equal(t, codes.NotFound, status.Code(err), "неизвестный резерв")
+	require.Equal(t, codes.NotFound, status.Code(err), "unknown reserve")
 
 	active, err := client.Reserve(ctx, &ledgerv1.ReserveRequest{
 		IdempotencyKey: "payout-3:reserve",
@@ -441,7 +441,7 @@ func TestIntegrationGrpcReserveErrorCodes(t *testing.T) {
 		IdempotencyKey: "payout-3:commit",
 		ReserveId:      active.GetReserveId(),
 	})
-	require.Equal(t, codes.FailedPrecondition, status.Code(err), "захват освобожденного резерва")
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "capturing a released reserve")
 
 	_, err = client.Reserve(ctx, &ledgerv1.ReserveRequest{
 		IdempotencyKey: "payout-4:reserve",
@@ -449,7 +449,7 @@ func TestIntegrationGrpcReserveErrorCodes(t *testing.T) {
 		Amount:         &commonv1.Money{MinorUnits: 100, Asset: "BTC", Decimals: 8},
 		RefId:          "payout-4",
 	})
-	require.Equal(t, codes.InvalidArgument, status.Code(err), "чужой актив")
+	require.Equal(t, codes.InvalidArgument, status.Code(err), "foreign asset")
 
 	_, err = client.Reserve(ctx, &ledgerv1.ReserveRequest{
 		IdempotencyKey: "payout-3:reserve",
@@ -457,5 +457,5 @@ func TestIntegrationGrpcReserveErrorCodes(t *testing.T) {
 		Amount:         reserveMoney(900),
 		RefId:          "payout-3",
 	})
-	require.Equal(t, codes.AlreadyExists, status.Code(err), "ключ резерва занят другим телом")
+	require.Equal(t, codes.AlreadyExists, status.Code(err), "the reserve key is taken by a different body")
 }

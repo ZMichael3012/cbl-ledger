@@ -22,11 +22,11 @@ import (
 	"github.com/cbl/cbl-ledger/internal/storage"
 )
 
-// testEventSink пишет конверты ledger.events в outbox в транзакции бизнес-изменения
-// (как продюсерский путь сервиса): нужен для проверки атомарности outbox.
+// testEventSink writes ledger.events envelopes to the outbox inside the business-change
+// transaction (like the service producer path): it is needed to verify outbox atomicity.
 type testEventSink struct{}
 
-// AppendTxnEvent добавляет конверт события в переданной транзакции.
+// AppendTxnEvent appends the event envelope within the given transaction.
 func (testEventSink) AppendTxnEvent(ctx context.Context, tx *gorm.DB, event storage.TxnEvent) error {
 	envelope, err := outbox.NewEnvelope(event.Type, "ledger.events", event.Key,
 		map[string]string{"producer": "cbl-ledger"}, []byte(event.Type))
@@ -36,7 +36,7 @@ func (testEventSink) AppendTxnEvent(ctx context.Context, tx *gorm.DB, event stor
 	return outbox.NewStore().Append(ctx, tx, envelope)
 }
 
-// rowCounts описывает счетчики строк для проверки атомарности операций.
+// rowCounts describes row counters for verifying operation atomicity.
 type rowCounts struct {
 	Transactions int64
 	Entries      int64
@@ -46,7 +46,7 @@ type rowCounts struct {
 	Outbox       int64
 }
 
-// snapshotRowCounts собирает счетчики строк таблиц леджера.
+// snapshotRowCounts collects the row counters of the ledger tables.
 func snapshotRowCounts(t *testing.T, db *gorm.DB) rowCounts {
 	t.Helper()
 	var counts rowCounts
@@ -59,7 +59,7 @@ func snapshotRowCounts(t *testing.T, db *gorm.DB) rowCounts {
 	return counts
 }
 
-// balanceInvariantRow описывает строку агрегата инварианта балансов.
+// balanceInvariantRow describes a row of the balance invariant aggregate.
 type balanceInvariantRow struct {
 	AccountID string `gorm:"column:account_id"`
 	Type      string `gorm:"column:type"`
@@ -70,10 +70,10 @@ type balanceInvariantRow struct {
 	Debits    int64  `gorm:"column:debits"`
 }
 
-// checkPropertyInvariants независимо (SQL-агрегаты) проверяет инварианты леджера:
-// баланс = начальный + кредиты - дебеты; reserved равен сумме активных удержаний;
-// сохранность суммы по активу; сбалансированность транзакций; целостность резервов;
-// снимки только у проводок PostTransaction.
+// checkPropertyInvariants independently verifies the ledger invariants (via SQL aggregates):
+// balance = initial + credits - debits; reserved equals the sum of active holds;
+// conservation of the sum per asset; transaction balance; reserve integrity;
+// snapshots only for PostTransaction entries.
 func checkPropertyInvariants(t *testing.T, db *gorm.DB, initial map[string]int64, assetTotals map[string]int64, stage string) {
 	t.Helper()
 
@@ -92,18 +92,18 @@ func checkPropertyInvariants(t *testing.T, db *gorm.DB, initial map[string]int64
 	for _, row := range rows {
 		expected := initial[row.AccountID] + row.Credits - row.Debits
 		assert.Equalf(t, expected, row.Available+row.Reserved,
-			"баланс = начальный + кредиты - дебеты (%s, %s)", row.AccountID, stage)
+			"balance = initial + credits - debits (%s, %s)", row.AccountID, stage)
 		assert.GreaterOrEqualf(t, row.Reserved, int64(0), "reserved >= 0 (%s, %s)", row.AccountID, stage)
 		if row.Available < 0 {
 			assert.Containsf(t, []string{"clearing", "fee", "suspense"}, row.Type,
-				"отрицательный available только у транзитных счетов (%s, %s)", row.AccountID, stage)
+				"negative available only on transit accounts (%s, %s)", row.AccountID, stage)
 		}
 		globalByAsset[row.Asset] += row.Available + row.Reserved
 	}
-	assert.Equalf(t, assetTotals, globalByAsset, "глобальные суммы по активам сохраняются (%s)", stage)
+	assert.Equalf(t, assetTotals, globalByAsset, "global sums per asset are conserved (%s)", stage)
 
-	// reserved счета равен сумме его активных удержаний: ловит перенос средств
-	// при release/commit с неверным направлением или без смены статуса.
+	// The account reserved equals the sum of its active holds: it catches fund movement
+	// on release/commit with a wrong direction or without a status change.
 	var reservedRows []struct {
 		AccountID string `gorm:"column:account_id"`
 		Reserved  int64  `gorm:"column:reserved"`
@@ -116,7 +116,7 @@ func checkPropertyInvariants(t *testing.T, db *gorm.DB, initial map[string]int64
 		FROM balances AS b`).Scan(&reservedRows).Error)
 	for _, row := range reservedRows {
 		assert.Equalf(t, row.ActiveSum, row.Reserved,
-			"reserved = сумма активных удержаний (%s, %s)", row.AccountID, stage)
+			"reserved = sum of active holds (%s, %s)", row.AccountID, stage)
 	}
 
 	var unbalanced int64
@@ -127,17 +127,17 @@ func checkPropertyInvariants(t *testing.T, db *gorm.DB, initial map[string]int64
 			HAVING SUM(CASE WHEN direction = 'credit' THEN amount ELSE 0 END)
 			    <> SUM(CASE WHEN direction = 'debit' THEN amount ELSE 0 END)
 		) AS unbalanced`).Scan(&unbalanced).Error)
-	assert.Zerof(t, unbalanced, "каждая транзакция сбалансирована (%s)", stage)
+	assert.Zerof(t, unbalanced, "every transaction is balanced (%s)", stage)
 
-	// Целостность резервов: committed ссылается на существующую проводку,
-	// захват пишет ровно пару проводок.
+	// Reserve integrity: a committed reserve references an existing transaction,
+	// and a commit writes exactly a pair of entries.
 	var brokenCommitted int64
 	require.NoError(t, db.Raw(`
 		SELECT COUNT(*) FROM reserves AS r
 		WHERE r.status = 'committed'
 		  AND NOT EXISTS (SELECT 1 FROM transactions AS t WHERE t.id = r.transaction_id)`).
 		Scan(&brokenCommitted).Error)
-	assert.Zerof(t, brokenCommitted, "committed-резерв ссылается на проводку (%s)", stage)
+	assert.Zerof(t, brokenCommitted, "a committed reserve references a transaction (%s)", stage)
 
 	var brokenCommitEntries int64
 	require.NoError(t, db.Raw(`
@@ -148,9 +148,9 @@ func checkPropertyInvariants(t *testing.T, db *gorm.DB, initial map[string]int64
 			GROUP BY e.transaction_id
 			HAVING COUNT(*) <> 2
 		) AS broken`).Scan(&brokenCommitEntries).Error)
-	assert.Zerof(t, brokenCommitEntries, "захват резерва пишет ровно пару проводок (%s)", stage)
+	assert.Zerof(t, brokenCommitEntries, "a reserve commit writes exactly a pair of entries (%s)", stage)
 
-	// Снимки balances_after пишут только проводки PostTransaction (не резервы).
+	// balances_after snapshots are written only for PostTransaction entries (not reserves).
 	var expectedSnapshots int64
 	require.NoError(t, db.Raw(`
 		SELECT COUNT(*) FROM (
@@ -160,25 +160,25 @@ func checkPropertyInvariants(t *testing.T, db *gorm.DB, initial map[string]int64
 		) AS pairs`).Scan(&expectedSnapshots).Error)
 	var snapshots int64
 	require.NoError(t, db.Model(&storage.TransactionBalance{}).Count(&snapshots).Error)
-	assert.Equalf(t, expectedSnapshots, snapshots, "снимки соответствуют проводкам (%s)", stage)
+	assert.Equalf(t, expectedSnapshots, snapshots, "snapshots match the transactions (%s)", stage)
 
 	var reserveSnapshots int64
 	require.NoError(t, db.Raw(`
 		SELECT COUNT(*) FROM transaction_balances AS tb
 		JOIN transactions AS t ON t.id = tb.transaction_id
 		WHERE t.ref_type = 'reserve'`).Scan(&reserveSnapshots).Error)
-	assert.Zerof(t, reserveSnapshots, "захваты резервов не пишут снимки (%s)", stage)
+	assert.Zerof(t, reserveSnapshots, "reserve commits do not write snapshots (%s)", stage)
 }
 
-// replayCase описывает успешную проводку для проверки идемпотентного повтора.
+// replayCase describes a successful transaction for verifying an idempotent replay.
 type replayCase struct {
 	key     string
 	refID   string
 	entries []domain.EntryInput
 }
 
-// propertyRand возвращает генератор сценария: фиксированный сид, переопределяемый
-// PROPERTY_SEED для локализации редких сбоев.
+// propertyRand returns the scenario generator: a fixed seed, overridable via
+// PROPERTY_SEED to localize rare failures.
 func propertyRand(t *testing.T) *rand.Rand {
 	t.Helper()
 	seed := int64(20261014)
@@ -217,7 +217,7 @@ func TestIntegrationPropertyInvariants(t *testing.T) {
 	check := func(stage string) { checkPropertyInvariants(t, db, initial, assetTotals, stage) }
 	check("seed")
 
-	// Счетчики успешных операций: проверяют живучесть сценария и точные дельты строк.
+	// Successful operation counters: they verify scenario liveness and exact row deltas.
 	var posts, reserves, commits, releases, expectedEntries int
 	var rejectedUnbalanced, rejectedInsufficient, rejectedState, rejectedAsset, rejectedReuse int
 	var activeReserves, finalizedReserves []string
@@ -254,11 +254,11 @@ func TestIntegrationPropertyInvariants(t *testing.T) {
 			case unbalanced:
 				require.ErrorIs(t, err, domain.ErrUnbalanced)
 				rejectedUnbalanced++
-				assert.Equal(t, before, snapshotRowCounts(t, db), "отвергнутая проводка не меняет состояние (%s)", stage)
+				assert.Equal(t, before, snapshotRowCounts(t, db), "a rejected transaction does not change state (%s)", stage)
 			case err != nil:
-				require.ErrorIs(t, err, domain.ErrInsufficientFunds, "неожиданная ошибка (%s): %v", stage, err)
+				require.ErrorIs(t, err, domain.ErrInsufficientFunds, "unexpected error (%s): %v", stage, err)
 				rejectedInsufficient++
-				assert.Equal(t, before, snapshotRowCounts(t, db), "отвергнутая проводка не меняет состояние (%s)", stage)
+				assert.Equal(t, before, snapshotRowCounts(t, db), "a rejected transaction does not change state (%s)", stage)
 			default:
 				posts++
 				expectedEntries += 2
@@ -278,9 +278,9 @@ func TestIntegrationPropertyInvariants(t *testing.T) {
 				RefID:          key,
 			})
 			if err != nil {
-				require.ErrorIs(t, err, domain.ErrInsufficientFunds, "неожиданная ошибка (%s): %v", stage, err)
+				require.ErrorIs(t, err, domain.ErrInsufficientFunds, "unexpected error (%s): %v", stage, err)
 				rejectedInsufficient++
-				assert.Equal(t, before, snapshotRowCounts(t, db), "отвергнутое удержание не меняет состояние (%s)", stage)
+				assert.Equal(t, before, snapshotRowCounts(t, db), "a rejected hold does not change state (%s)", stage)
 			} else {
 				reserves++
 				activeReserves = append(activeReserves, result.ReserveID)
@@ -297,9 +297,9 @@ func TestIntegrationPropertyInvariants(t *testing.T) {
 				activeReserves = append(activeReserves[:index], activeReserves[index+1:]...)
 				finalizedReserves = append(finalizedReserves, reserveID)
 			} else {
-				require.ErrorIs(t, err, domain.ErrReserveState, "неожиданная ошибка (%s): %v", stage, err)
+				require.ErrorIs(t, err, domain.ErrReserveState, "unexpected error (%s): %v", stage, err)
 				rejectedState++
-				assert.Equal(t, before, snapshotRowCounts(t, db), "отвергнутый захват не меняет состояние (%s)", stage)
+				assert.Equal(t, before, snapshotRowCounts(t, db), "a rejected commit does not change state (%s)", stage)
 			}
 		} else {
 			index := rng.IntN(len(activeReserves))
@@ -312,33 +312,33 @@ func TestIntegrationPropertyInvariants(t *testing.T) {
 				activeReserves = append(activeReserves[:index], activeReserves[index+1:]...)
 				finalizedReserves = append(finalizedReserves, reserveID)
 			} else {
-				require.ErrorIs(t, err, domain.ErrReserveState, "неожиданная ошибка (%s): %v", stage, err)
+				require.ErrorIs(t, err, domain.ErrReserveState, "unexpected error (%s): %v", stage, err)
 				rejectedState++
-				assert.Equal(t, before, snapshotRowCounts(t, db), "отвергнутый возврат не меняет состояние (%s)", stage)
+				assert.Equal(t, before, snapshotRowCounts(t, db), "a rejected release does not change state (%s)", stage)
 			}
 		}
 		check(stage)
 	}
 
-	// Детерминированные отказные кейсы: FR-3 не должен зависеть от везения сида.
+	// Deterministic rejection cases: FR-3 must not depend on seed luck.
 	assertPositive := func(t *testing.T, counter int, name string) {
 		t.Helper()
-		assert.Greaterf(t, counter, 0, "класс отказов %s не воспроизведен сценарием", name)
+		assert.Greaterf(t, counter, 0, "rejection class %s was not reproduced by the scenario", name)
 	}
-	require.Greater(t, posts, 0, "сценарий обязан содержать успешные проводки")
+	require.Greater(t, posts, 0, "the scenario must contain successful transactions")
 
-	// Дисбаланс: детерминированный кейс, FR-3 не зависит от везения сида.
+	// Imbalance: a deterministic case, FR-3 does not depend on seed luck.
 	before := snapshotRowCounts(t, db)
 	_, err := repo.PostTransaction(ctx, "prop-unbalanced", "property", "prop-unbalanced", []domain.EntryInput{
 		{AccountID: u1.ID, Direction: domain.DirectionDebit, Amount: 100},
 		{AccountID: uFee.ID, Direction: domain.DirectionCredit, Amount: 101},
 	})
 	require.ErrorIs(t, err, domain.ErrUnbalanced)
-	assert.Equal(t, before, snapshotRowCounts(t, db), "отвергнутый дисбаланс не меняет состояние")
+	assert.Equal(t, before, snapshotRowCounts(t, db), "a rejected imbalance does not change state")
 	rejectedUnbalanced++
 	assertPositive(t, rejectedUnbalanced, "unbalanced")
 
-	// Нехватка средств на проводке: дебет больше доступного.
+	// Insufficient funds on a transaction: the debit exceeds the available balance.
 	available := balanceOf(t, db, u1.ID)
 	nsfAmount := available + 1
 	before = snapshotRowCounts(t, db)
@@ -347,30 +347,30 @@ func TestIntegrationPropertyInvariants(t *testing.T) {
 		{AccountID: uFee.ID, Direction: domain.DirectionCredit, Amount: nsfAmount},
 	})
 	require.ErrorIs(t, err, domain.ErrInsufficientFunds)
-	assert.Equal(t, before, snapshotRowCounts(t, db), "отвергнутая проводка NSF не меняет состояние")
+	assert.Equal(t, before, snapshotRowCounts(t, db), "a rejected NSF transaction does not change state")
 	rejectedInsufficient++
 
-	// Нехватка средств на удержании: сумма больше доступного.
+	// Insufficient funds on a hold: the amount exceeds the available balance.
 	before = snapshotRowCounts(t, db)
 	_, err = repo.Reserve(ctx, storage.ReserveInput{
 		IdempotencyKey: "prop-nsf-reserve", AccountID: u1.ID, Asset: "USDT", Decimals: 2,
 		Amount: balanceOf(t, db, u1.ID) + 1, RefID: "prop-nsf-reserve",
 	})
 	require.ErrorIs(t, err, domain.ErrInsufficientFunds)
-	assert.Equal(t, before, snapshotRowCounts(t, db), "отвергнутое удержание NSF не меняет состояние")
+	assert.Equal(t, before, snapshotRowCounts(t, db), "a rejected NSF hold does not change state")
 	rejectedInsufficient++
 
-	// Смешивание активов в одной транзакции отклоняется.
+	// Asset mixing within one transaction is rejected.
 	before = snapshotRowCounts(t, db)
 	_, err = repo.PostTransaction(ctx, "prop-mixed", "property", "prop-mixed", []domain.EntryInput{
 		{AccountID: u1.ID, Direction: domain.DirectionDebit, Amount: 100},
 		{AccountID: b1.ID, Direction: domain.DirectionCredit, Amount: 100},
 	})
 	require.ErrorIs(t, err, domain.ErrAssetMismatch)
-	assert.Equal(t, before, snapshotRowCounts(t, db), "смешивание активов не меняет состояние")
+	assert.Equal(t, before, snapshotRowCounts(t, db), "asset mixing does not change state")
 	rejectedAsset++
 
-	// Прямые проверки встречных переходов резервов (спека, раздел 6).
+	// Direct checks of conflicting reserve transitions (spec, section 6).
 	ensureActiveReserve := func(key string) string {
 		if len(activeReserves) > 0 {
 			return activeReserves[len(activeReserves)-1]
@@ -383,7 +383,7 @@ func TestIntegrationPropertyInvariants(t *testing.T) {
 		activeReserves = append(activeReserves, result.ReserveID)
 		return result.ReserveID
 	}
-	// commit после release
+	// commit after release
 	releaseID := ensureActiveReserve("prop-state-release")
 	_, err = repo.ReleaseReserve(ctx, "prop-state-release-op", releaseID, "state check")
 	require.NoError(t, err)
@@ -392,9 +392,9 @@ func TestIntegrationPropertyInvariants(t *testing.T) {
 	before = snapshotRowCounts(t, db)
 	_, err = repo.CommitReserve(ctx, "prop-state-commit-after-release", releaseID)
 	require.ErrorIs(t, err, domain.ErrReserveState)
-	assert.Equal(t, before, snapshotRowCounts(t, db), "commit released резерва не меняет состояние")
+	assert.Equal(t, before, snapshotRowCounts(t, db), "committing a released reserve does not change state")
 	rejectedState++
-	// release после commit
+	// release after commit
 	commitID := ensureActiveReserve("prop-state-commit")
 	_, err = repo.CommitReserve(ctx, "prop-state-commit-op", commitID)
 	require.NoError(t, err)
@@ -404,14 +404,14 @@ func TestIntegrationPropertyInvariants(t *testing.T) {
 	before = snapshotRowCounts(t, db)
 	_, err = repo.ReleaseReserve(ctx, "prop-state-release-after-commit", commitID, "state check")
 	require.ErrorIs(t, err, domain.ErrReserveState)
-	assert.Equal(t, before, snapshotRowCounts(t, db), "release committed резерва не меняет состояние")
+	assert.Equal(t, before, snapshotRowCounts(t, db), "releasing a committed reserve does not change state")
 	rejectedState++
 	assertPositive(t, rejectedState, "reserve state")
-	require.Greater(t, reserves, 0, "сценарий обязан создать удержания")
-	require.Greater(t, commits, 0, "сценарий обязан выполнить захват")
-	require.Greater(t, releases, 0, "сценарий обязан выполнить возврат")
+	require.Greater(t, reserves, 0, "the scenario must create holds")
+	require.Greater(t, commits, 0, "the scenario must perform a commit")
+	require.Greater(t, releases, 0, "the scenario must perform a release")
 
-	// Проводка с повторяющимся счетом: снимок пишется на счет, а не на проводку.
+	// A transaction with a repeated account: the snapshot is written per account, not per entry.
 	before = snapshotRowCounts(t, db)
 	_, err = repo.PostTransaction(ctx, "prop-multi", "property", "prop-multi", []domain.EntryInput{
 		{AccountID: u1.ID, Direction: domain.DirectionDebit, Amount: 100},
@@ -425,44 +425,44 @@ func TestIntegrationPropertyInvariants(t *testing.T) {
 	expectedEntries += 4
 	assert.Equal(t, before.Transactions+1, after.Transactions)
 	assert.Equal(t, before.Entries+4, after.Entries)
-	assert.Equal(t, before.Snapshots+2, after.Snapshots, "снимок на счет, а не на проводку")
+	assert.Equal(t, before.Snapshots+2, after.Snapshots, "a snapshot per account, not per entry")
 	assert.Equal(t, before.Outbox+1, after.Outbox)
 
-	// Идемпотентность: повтор успешных проводок не создает эффектов.
-	require.NotEmpty(t, replays, "сценарий обязан содержать успешные проводки для replay")
+	// Idempotency: a repeat of successful transactions creates no effects.
+	require.NotEmpty(t, replays, "the scenario must contain successful transactions for replay")
 	before = snapshotRowCounts(t, db)
 	for _, replay := range replays {
 		result, replayErr := repo.PostTransaction(ctx, replay.key, "property", replay.refID, replay.entries)
 		require.NoError(t, replayErr)
 		assert.True(t, result.Replayed)
 	}
-	assert.Equal(t, before, snapshotRowCounts(t, db), "replay не создает эффектов")
+	assert.Equal(t, before, snapshotRowCounts(t, db), "replay creates no effects")
 	check("replay")
 
-	// Повтор ключа с другим телом отклоняется и не меняет состояние.
+	// A key repeat with a different body is rejected and does not change state.
 	mutated := append([]domain.EntryInput(nil), replays[0].entries...)
 	mutated[0].Amount++
 	mutated[1].Amount++
 	_, err = repo.PostTransaction(ctx, replays[0].key, "property", replays[0].refID, mutated)
 	require.ErrorIs(t, err, domain.ErrIdempotencyReuse)
 	rejectedReuse++
-	assert.Equal(t, before, snapshotRowCounts(t, db), "конфликт ключа не меняет состояние")
+	assert.Equal(t, before, snapshotRowCounts(t, db), "a key conflict does not change state")
 	assertPositive(t, rejectedReuse, "key reuse")
 	assertPositive(t, rejectedInsufficient, "insufficient funds")
 	assertPositive(t, rejectedAsset, "asset mismatch")
 
-	// Точные дельты строк: ловит «пустые» операции и лишние записи.
+	// Exact row deltas: it catches empty operations and extra writes.
 	final := snapshotRowCounts(t, db)
 	assert.Equal(t, int64(posts+commits), final.Transactions)
 	assert.Equal(t, int64(expectedEntries), final.Entries)
 	assert.Equal(t, int64(reserves), final.Reserves)
 	assert.Equal(t, int64(commits+releases), final.ReserveOps)
-	assert.Equal(t, int64(2*posts), final.Snapshots, "снимок на каждую проводку PostTransaction")
-	assert.Equal(t, int64(posts+reserves+commits+releases), final.Outbox, "событие на каждую мутацию")
+	assert.Equal(t, int64(2*posts), final.Snapshots, "a snapshot for every PostTransaction entry")
+	assert.Equal(t, int64(posts+reserves+commits+releases), final.Outbox, "an event per mutation")
 	check("final")
 }
 
-// balanceOf читает доступный баланс счета.
+// balanceOf reads the available balance of an account.
 func balanceOf(t *testing.T, db *gorm.DB, accountID string) int64 {
 	t.Helper()
 	var balance storage.Balance

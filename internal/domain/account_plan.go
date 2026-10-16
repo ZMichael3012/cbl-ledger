@@ -7,30 +7,30 @@ import (
 	"github.com/google/uuid"
 )
 
-// accountNamePrefix задает версионированный префикс канонического имени счета:
-// смена схемы вывода идентификаторов выпускается новой версией префикса.
+// accountNamePrefix sets the versioned prefix of the canonical account name:
+// a change of the identifier derivation scheme is released as a new prefix version.
 const accountNamePrefix = "cbl:ledger:account:v1"
 
-// assetPattern ограничивает код актива плана счетов.
+// assetPattern constrains the account plan asset code.
 var assetPattern = regexp.MustCompile(`^[A-Z0-9]{1,16}$`)
 
-// merchantRefPattern ограничивает ссылку на мерчанта: без двоеточий,
-// чтобы каноническое имя счета оставалось однозначным.
+// merchantRefPattern constrains the merchant reference: no colons,
+// so that the canonical account name stays unambiguous.
 var merchantRefPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
-// AccountKey описывает бизнес-ключ счета плана счетов.
+// AccountKey describes the business key of an account plan account.
 type AccountKey struct {
-	// Type задает тип счета плана счетов.
+	// Type sets the account plan account type.
 	Type AccountType
-	// Asset задает код актива счета.
+	// Asset sets the account asset code.
 	Asset string
-	// Decimals задает количество знаков после точки.
+	// Decimals sets the number of decimal places.
 	Decimals int32
-	// MerchantRef задает ссылку на мерчанта (обязательна для merchant и payout).
+	// MerchantRef sets the merchant reference (required for merchant and payout).
 	MerchantRef string
 }
 
-// Validate проверяет правила плана счетов для бизнес-ключа.
+// Validate checks the account plan rules for the business key.
 func (k AccountKey) Validate() error {
 	if !k.Type.Valid() {
 		return fmt.Errorf("%w: unknown account type %q", ErrInvalidAccountPlan, k.Type)
@@ -51,14 +51,14 @@ func (k AccountKey) Validate() error {
 	return nil
 }
 
-// CanonicalName возвращает каноническое имя счета для вывода идентификатора.
+// CanonicalName returns the canonical account name used to derive the identifier.
 func (k AccountKey) CanonicalName() string {
 	return fmt.Sprintf("%s:%s:%s:%d:%s", accountNamePrefix, k.Type, k.Asset, k.Decimals, k.MerchantRef)
 }
 
-// DeriveAccountID выводит детерминированный UUIDv5 счета из бизнес-ключа (ADR-2.6).
-// Одинаковый ключ в любом сервисе дает один и тот же идентификатор; ключ обязан
-// проходить Validate, иначе идентификатор не определен.
+// DeriveAccountID derives the deterministic UUIDv5 of an account from the business key (ADR-2.6).
+// The same key in any service yields the same identifier; the key must
+// pass Validate, otherwise the identifier is undefined.
 func DeriveAccountID(key AccountKey) (uuid.UUID, error) {
 	if err := key.Validate(); err != nil {
 		return uuid.Nil, err
@@ -66,23 +66,23 @@ func DeriveAccountID(key AccountKey) (uuid.UUID, error) {
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(key.CanonicalName())), nil
 }
 
-// MerchantAccountKey собирает ключ мерчантского счета.
+// MerchantAccountKey builds a merchant account key.
 func MerchantAccountKey(merchantRef, asset string, decimals int32) AccountKey {
 	return AccountKey{Type: AccountTypeMerchant, Asset: asset, Decimals: decimals, MerchantRef: merchantRef}
 }
 
-// ValidMerchantRef сообщает, что ссылка на мерчанта допустима планом счетов;
-// используется транспортом для недоверенного ввода фильтров выписки.
+// ValidMerchantRef reports whether the merchant reference is allowed by the account plan;
+// used by the transport for untrusted input of statement filters.
 func ValidMerchantRef(ref string) bool {
 	return merchantRefPattern.MatchString(ref)
 }
 
-// PayoutAccountKey собирает ключ счета выплат мерчанта.
+// PayoutAccountKey builds a merchant payout account key.
 func PayoutAccountKey(merchantRef, asset string, decimals int32) AccountKey {
 	return AccountKey{Type: AccountTypePayout, Asset: asset, Decimals: decimals, MerchantRef: merchantRef}
 }
 
-// PlatformAccountKey собирает ключ платформенного счета (clearing, fee или suspense).
+// PlatformAccountKey builds a platform account key (clearing, fee or suspense).
 func PlatformAccountKey(accountType AccountType, asset string, decimals int32) AccountKey {
 	return AccountKey{Type: accountType, Asset: asset, Decimals: decimals}
 }

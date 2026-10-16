@@ -18,39 +18,40 @@ import (
 	"github.com/cbl/cbl-ledger/internal/domain"
 )
 
-// errReserveStateRace сообщает о проигранной гонке финализации резерва:
-// состояние изменила конкурирующая операция, попытку нужно повторить.
+// errReserveStateRace reports a lost reserve finalization race:
+// a concurrent operation changed the state, and the attempt must be retried.
 var errReserveStateRace = errors.New("storage: reserve state race")
 
-// ReserveInput описывает запрос удержания средств на счете.
+// ReserveInput describes a request to hold funds on an account.
 type ReserveInput struct {
-	// IdempotencyKey задает ключ идемпотентности создания резерва.
+	// IdempotencyKey sets the idempotency key of the reserve creation.
 	IdempotencyKey string
-	// AccountID задает счет удержания.
+	// AccountID sets the hold account.
 	AccountID string
-	// Asset задает актив суммы для сверки со счетом.
+	// Asset sets the asset of the amount for verification against the account.
 	Asset string
-	// Decimals задает количество знаков после точки для сверки со счетом.
+	// Decimals sets the number of decimal places for verification against the account.
 	Decimals int32
-	// Amount задает сумму удержания в минимальных единицах актива.
+	// Amount sets the hold amount in asset minor units.
 	Amount int64
-	// RefID задает бизнес-ссылку удержания.
+	// RefID sets the hold business reference.
 	RefID string
 }
 
-// ReserveResult описывает результат операции резерва.
+// ReserveResult describes the result of a reserve operation.
 type ReserveResult struct {
-	// ReserveID задает идентификатор резерва.
+	// ReserveID sets the reserve identifier.
 	ReserveID string
-	// Status задает текущее состояние резерва.
+	// Status sets the current reserve state.
 	Status domain.ReserveStatus
-	// Replayed сообщает, что результат возвращен по повторному ключу операции.
+	// Replayed reports that the result was returned for a repeated operation key.
 	Replayed bool
 }
 
-// Reserve создает удержание средств: переводит сумму из available в reserved счета мерчанта.
-// Резервирование доступно только для счетов типа merchant; повтор ключа с тем же телом
-// возвращает исходный резерв, с другим телом отклоняется ErrIdempotencyReuse.
+// Reserve creates a hold of funds: it moves the amount from available to reserved
+// on the merchant account. Reservation is available only for accounts of type
+// merchant; a key replay with the same body returns the original reserve, while a
+// different body is rejected with ErrIdempotencyReuse.
 func (r *Repository) Reserve(ctx context.Context, input ReserveInput) (ReserveResult, error) {
 	if strings.TrimSpace(input.IdempotencyKey) == "" {
 		return ReserveResult{}, fmt.Errorf("%w: empty idempotency_key", domain.ErrInvalidReserve)
@@ -73,7 +74,7 @@ func (r *Repository) Reserve(ctx context.Context, input ReserveInput) (ReserveRe
 	})
 }
 
-// reserveOnce выполняет одну попытку резервирования в транзакции базы.
+// reserveOnce performs a single reservation attempt in a database transaction.
 func (r *Repository) reserveOnce(ctx context.Context, input ReserveInput, hash string) (ReserveResult, error) {
 	reserveID, err := uuid.NewV7()
 	if err != nil {
@@ -100,8 +101,9 @@ func (r *Repository) reserveOnce(ctx context.Context, input ReserveInput, hash s
 		if account.Type != string(domain.AccountTypeMerchant) {
 			return fmt.Errorf("%w: type %s", domain.ErrReserveNotAllowed, account.Type)
 		}
-		// Без ссылки на мерчанта счет нельзя однозначно связать со счетом выплат:
-		// fail-closed, иначе коммиты разных мерчантов смешались бы в общем счете.
+		// Without a merchant reference the account cannot be unambiguously linked
+		// to a payout account: fail-closed, otherwise captures of different
+		// merchants would mix in a shared account.
 		if account.MerchantRef == nil || strings.TrimSpace(*account.MerchantRef) == "" {
 			return fmt.Errorf("%w: merchant account %s without merchant_ref", domain.ErrReserveNotAllowed, account.ID)
 		}
@@ -171,9 +173,9 @@ func (r *Repository) reserveOnce(ctx context.Context, input ReserveInput, hash s
 	return result, nil
 }
 
-// CommitReserve захватывает удержание: уменьшает reserved счета, зачисляет средства
-// на счет выплат и создает сбалансированную проводку. Повтор в статусе committed
-// идемпотентен; захват освобожденного или неизвестного резерва отклоняется.
+// CommitReserve captures a hold: it decreases the account reserved, credits the
+// funds to the payout account, and creates a balanced posting. A replay in the
+// committed status is idempotent; capturing a released or unknown reserve is rejected.
 func (r *Repository) CommitReserve(ctx context.Context, idempotencyKey, reserveID string) (ReserveResult, error) {
 	if strings.TrimSpace(idempotencyKey) == "" {
 		return ReserveResult{}, fmt.Errorf("%w: empty idempotency_key", domain.ErrInvalidReserve)
@@ -189,7 +191,7 @@ func (r *Repository) CommitReserve(ctx context.Context, idempotencyKey, reserveI
 	})
 }
 
-// commitOnce выполняет одну попытку захвата резерва в транзакции базы.
+// commitOnce performs a single reserve capture attempt in a database transaction.
 func (r *Repository) commitOnce(ctx context.Context, idempotencyKey, reserveID, hash string) (ReserveResult, error) {
 	var result ReserveResult
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -224,8 +226,8 @@ func (r *Repository) commitOnce(ctx context.Context, idempotencyKey, reserveID, 
 			return fmt.Errorf("%w: reserve %s is released", domain.ErrReserveState, reserve.ID)
 		case domain.ReserveStatusActive:
 		}
-		// Ключ коммита попадает и в transactions: занятый там ключ - это конфликт
-		// тела ключа (idempotency_key_reuse), а не конкурентная гонка с повтором.
+		// The commit key also lands in transactions: a key taken there is a key
+		// body conflict (idempotency_key_reuse), not a concurrent race with a retry.
 		if _, err := findTransaction(tx, idempotencyKey); err == nil {
 			return fmt.Errorf("%w: key %q already used by posted transaction", domain.ErrIdempotencyReuse, idempotencyKey)
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -240,8 +242,9 @@ func (r *Repository) commitOnce(ctx context.Context, idempotencyKey, reserveID, 
 		if err != nil {
 			return err
 		}
-		// Резерв и баланс читаются в разных снапшотах READ COMMITTED: расхождение
-		// означает конкурентную финализацию (или порчу данных) - попытку нужно повторить.
+		// The reserve and the balance are read in different READ COMMITTED snapshots:
+		// a mismatch means concurrent finalization (or data corruption), and the
+		// attempt must be retried.
 		if sourceBalance.Reserved < reserve.Amount {
 			return errReserveStateRace
 		}
@@ -252,8 +255,8 @@ func (r *Repository) commitOnce(ctx context.Context, idempotencyKey, reserveID, 
 		}
 		destination, err := ensureAccountTx(tx, domain.PayoutAccountKey(payoutRef, source.Asset, source.Decimals))
 		if errors.Is(err, domain.ErrAccountConflict) {
-			// Существующий счет выплат с другой шкалой - расхождение активов
-			// в терминах 2.4, а не конфликт провижининга.
+			// An existing payout account with a different scale is an asset mismatch
+			// in the terms of 2.4, not a provisioning conflict.
 			return fmt.Errorf("%w: payout account decimals mismatch: %w", domain.ErrAssetMismatch, err)
 		}
 		if err != nil {
@@ -267,8 +270,8 @@ func (r *Repository) commitOnce(ctx context.Context, idempotencyKey, reserveID, 
 			return fmt.Errorf("storage: payout balance overflow for account %s", destination.ID)
 		}
 
-		// Балансы обновляются в детерминированном порядке: иначе встречные коммиты
-		// двух счетов могут дать deadlock 40P01 (как в postOnce).
+		// Balances are updated in a deterministic order: otherwise opposite commits
+		// of two accounts could produce a 40P01 deadlock (as in postOnce).
 		now := time.Now().UTC()
 		updates := []struct {
 			accountID   string
@@ -374,9 +377,9 @@ func (r *Repository) commitOnce(ctx context.Context, idempotencyKey, reserveID, 
 	return result, nil
 }
 
-// ReleaseReserve возвращает удержание: переводит reserved обратно в available.
-// Повтор в статусе released идемпотентен; возврат захваченного или неизвестного
-// резерва отклоняется.
+// ReleaseReserve releases a hold: it moves reserved back to available. A replay
+// in the released status is idempotent; releasing a captured or unknown reserve
+// is rejected.
 func (r *Repository) ReleaseReserve(ctx context.Context, idempotencyKey, reserveID, reason string) (ReserveResult, error) {
 	if strings.TrimSpace(idempotencyKey) == "" {
 		return ReserveResult{}, fmt.Errorf("%w: empty idempotency_key", domain.ErrInvalidReserve)
@@ -392,7 +395,7 @@ func (r *Repository) ReleaseReserve(ctx context.Context, idempotencyKey, reserve
 	})
 }
 
-// releaseOnce выполняет одну попытку возврата резерва в транзакции базы.
+// releaseOnce performs a single reserve release attempt in a database transaction.
 func (r *Repository) releaseOnce(ctx context.Context, idempotencyKey, reserveID, reason, hash string) (ReserveResult, error) {
 	var result ReserveResult
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -432,7 +435,7 @@ func (r *Repository) releaseOnce(ctx context.Context, idempotencyKey, reserveID,
 		if err != nil {
 			return err
 		}
-		// См. commitOnce: расхождение снапшотов резерва и баланса - конкурентная гонка.
+		// See commitOnce: a mismatch between the reserve and balance snapshots is a concurrent race.
 		if balance.Reserved < reserve.Amount {
 			return errReserveStateRace
 		}
@@ -490,8 +493,8 @@ func (r *Repository) releaseOnce(ctx context.Context, idempotencyKey, reserveID,
 	return result, nil
 }
 
-// recordReserveOperation фиксирует ключ операции над резервом; нарушение
-// уникальности ключа считается конкурентной гонкой и повторяется политикой.
+// recordReserveOperation records the reserve operation key; a unique key
+// violation is treated as a concurrent race and retried by the policy.
 func recordReserveOperation(tx *gorm.DB, reserveID string, operation op, idempotencyKey, hash string) error {
 	row := ReserveOperation{
 		ReserveID:      reserveID,
@@ -509,8 +512,8 @@ func recordReserveOperation(tx *gorm.DB, reserveID string, operation op, idempot
 	return nil
 }
 
-// withReserveRetry повторяет операцию резерва при конкурентных конфликтах
-// согласно политике повторов репозитория.
+// withReserveRetry retries a reserve operation on concurrent conflicts
+// according to the repository retry policy.
 func (r *Repository) withReserveRetry(ctx context.Context, fn func() (ReserveResult, error)) (ReserveResult, error) {
 	policy := normalizeRetryPolicy(r.retryPolicy)
 	var lastErr error
@@ -526,8 +529,8 @@ func (r *Repository) withReserveRetry(ctx context.Context, fn func() (ReserveRes
 		if attempt == policy.MaxAttempts-1 {
 			break
 		}
-		// Полный jitter снижает синхронные повторные столкновения; криптостойкость не нужна.
-		delay := policy.nextDelay(attempt, rand.Int64N) //nolint:gosec // G404: jitter, не криптография
+		// Full jitter reduces synchronized repeated collisions; cryptographic strength is not needed.
+		delay := policy.nextDelay(attempt, rand.Int64N) //nolint:gosec // G404: jitter, not cryptography
 		if r.retryObserver != nil {
 			r.retryObserver(RetryEvent{Attempt: attempt + 1, Cause: retryCause(err), Delay: delay})
 		}
@@ -542,27 +545,27 @@ func (r *Repository) withReserveRetry(ctx context.Context, fn func() (ReserveRes
 	return ReserveResult{}, fmt.Errorf("%w: exceeded %d attempts: %w", domain.ErrConflict, policy.MaxAttempts, lastErr)
 }
 
-// op задает вид операции над резервом.
+// op sets the kind of reserve operation.
 type op string
 
-// reserveOpCommit и reserveOpRelease задают виды операций над резервом.
+// reserveOpCommit and reserveOpRelease set the kinds of reserve operations.
 const (
 	reserveOpCommit  op = "commit"
 	reserveOpRelease op = "release"
 )
 
-// reserveRefType задает тип бизнес-ссылки проводок захвата резерва.
-// Контракт Reserve не передает ref_type, поэтому проводки маркируются резервом.
+// reserveRefType sets the business reference type of the reserve capture postings.
+// The Reserve contract does not pass ref_type, so the postings are marked with the reserve.
 const reserveRefType = "reserve"
 
-// findReserveByKey ищет резерв по ключу идемпотентности.
+// findReserveByKey looks up a reserve by idempotency key.
 func findReserveByKey(tx *gorm.DB, idempotencyKey string) (Reserve, error) {
 	var reserve Reserve
 	err := tx.Where("idempotency_key = ?", idempotencyKey).First(&reserve).Error
 	return reserve, err
 }
 
-// findReserveByID ищет резерв по идентификатору.
+// findReserveByID looks up a reserve by identifier.
 func findReserveByID(tx *gorm.DB, reserveID string) (Reserve, error) {
 	var reserve Reserve
 	err := tx.Where("id = ?", reserveID).First(&reserve).Error
@@ -572,14 +575,14 @@ func findReserveByID(tx *gorm.DB, reserveID string) (Reserve, error) {
 	return reserve, err
 }
 
-// findReserveOperation ищет операцию над резервом по ключу идемпотентности.
+// findReserveOperation looks up a reserve operation by idempotency key.
 func findReserveOperation(tx *gorm.DB, idempotencyKey string) (ReserveOperation, error) {
 	var operation ReserveOperation
 	err := tx.Where("idempotency_key = ?", idempotencyKey).First(&operation).Error
 	return operation, err
 }
 
-// loadAccountByID загружает счет по идентификатору.
+// loadAccountByID loads an account by identifier.
 func loadAccountByID(tx *gorm.DB, accountID string) (Account, error) {
 	var account Account
 	err := tx.Where("id = ?", accountID).First(&account).Error
@@ -592,7 +595,7 @@ func loadAccountByID(tx *gorm.DB, accountID string) (Account, error) {
 	return account, nil
 }
 
-// loadBalance загружает баланс счета.
+// loadBalance loads the account balance.
 func loadBalance(tx *gorm.DB, accountID string) (Balance, error) {
 	var balance Balance
 	err := tx.Where("account_id = ?", accountID).First(&balance).Error
@@ -605,7 +608,7 @@ func loadBalance(tx *gorm.DB, accountID string) (Balance, error) {
 	return balance, nil
 }
 
-// reserveRequestHash вычисляет канонический хэш тела запроса резерва.
+// reserveRequestHash computes the canonical hash of the reserve request body.
 func reserveRequestHash(input ReserveInput) string {
 	digest := sha256.New()
 	_, _ = fmt.Fprintf(digest, "%d:%s|%d:%s|%d|%d|%d:%s",
@@ -616,8 +619,8 @@ func reserveRequestHash(input ReserveInput) string {
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
-// reserveOpHash вычисляет канонический хэш тела операции над резервом.
-// Reason не входит в хэш: повтор с другим текстом причины остается повтором.
+// reserveOpHash computes the canonical hash of the reserve operation body.
+// Reason is not part of the hash: a replay with a different reason text remains a replay.
 func reserveOpHash(operation, reserveID string) string {
 	digest := sha256.New()
 	_, _ = fmt.Fprintf(digest, "%d:%s|%d:%s", len(operation), operation, len(reserveID), reserveID)

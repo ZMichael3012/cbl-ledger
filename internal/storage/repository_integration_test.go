@@ -47,8 +47,8 @@ func setupLedgerDB(t testing.TB) *gorm.DB {
 
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
-	// Тихий логгер GORM: "record not found" в идемпотентном пути и логи бенчмарков
-	// забивают вывод; ошибки тесты проверяют через возвращаемые значения.
+	// A silent GORM logger: "record not found" on the idempotent path and benchmark logs
+	// flood the output; the tests check errors via return values.
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	require.NoError(t, err)
 	require.NoError(t, storagex.Migrate(ctx, db, filepath.Join("..", "..", "migrations")))
@@ -244,7 +244,7 @@ func TestIntegrationConcurrentDebits(t *testing.T) {
 	assert.Equal(t, int64(100*successes), feeBalance.Available)
 }
 
-// isExpectedConcurrencyError сообщает, что ошибка ожидаема при конкурентных спорах за баланс.
+// isExpectedConcurrencyError reports that the error is expected in concurrent contention for a balance.
 func isExpectedConcurrencyError(err error) bool {
 	return errors.Is(err, domain.ErrInsufficientFunds) || errors.Is(err, domain.ErrConflict)
 }

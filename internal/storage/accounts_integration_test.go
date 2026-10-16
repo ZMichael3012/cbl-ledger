@@ -23,7 +23,7 @@ func TestIntegrationEnsureAccountCreatesDerived(t *testing.T) {
 
 	merchant, err := repo.EnsureAccount(ctx, domain.MerchantAccountKey("m-1", "USDT", 2))
 	require.NoError(t, err)
-	assert.Equal(t, "58686062-c133-5d4e-b08b-0d33a0db924f", merchant.ID, "golden-вектор плана счетов")
+	assert.Equal(t, "58686062-c133-5d4e-b08b-0d33a0db924f", merchant.ID, "golden vector of the account plan")
 	assert.Equal(t, "USDT", merchant.Asset)
 	assert.Equal(t, int32(2), merchant.Decimals)
 	require.NotNil(t, merchant.MerchantRef)
@@ -36,16 +36,16 @@ func TestIntegrationEnsureAccountCreatesDerived(t *testing.T) {
 
 	replay, err := repo.EnsureAccount(ctx, domain.MerchantAccountKey("m-1", "USDT", 2))
 	require.NoError(t, err)
-	assert.Equal(t, merchant.ID, replay.ID, "повторный провижининг идемпотентен")
+	assert.Equal(t, merchant.ID, replay.ID, "repeated provisioning is idempotent")
 
 	fee, err := repo.EnsureAccount(ctx, domain.PlatformAccountKey(domain.AccountTypeFee, "USDT", 2))
 	require.NoError(t, err)
 	assert.Equal(t, "b138b712-5940-59bc-82bd-19f653642227", fee.ID)
-	assert.Nil(t, fee.MerchantRef, "платформенный счет без ссылки на мерчанта")
+	assert.Nil(t, fee.MerchantRef, "platform account without a merchant reference")
 
 	var accounts int64
 	require.NoError(t, db.Model(&storage.Account{}).Count(&accounts).Error)
-	assert.Equal(t, int64(2), accounts, "повтор не создает дублей")
+	assert.Equal(t, int64(2), accounts, "a repeat does not create duplicates")
 }
 
 func TestIntegrationEnsureAccountConcurrent(t *testing.T) {
@@ -69,7 +69,7 @@ func TestIntegrationEnsureAccountConcurrent(t *testing.T) {
 
 	for i := 0; i < workers; i++ {
 		require.NoError(t, errs[i])
-		assert.Equal(t, ids[0], ids[i], "все конкурентные вызовы возвращают один счет")
+		assert.Equal(t, ids[0], ids[i], "all concurrent calls return the same account")
 	}
 	var accounts int64
 	require.NoError(t, db.Model(&storage.Account{}).
@@ -81,8 +81,8 @@ func TestIntegrationEnsureAccountConcurrentMixedDecimals(t *testing.T) {
 	db := setupLedgerDB(t)
 	repo := storage.NewRepository(db, zap.NewNop())
 
-	// Гонка с разными decimals: победившая вставка занимает бизнес-ключ,
-	// проигравшие обязаны получить account_conflict, а не сырую ошибку БД.
+	// A race with different decimals: the winning insert takes the business key,
+	// and the losers must get account_conflict instead of a raw database error.
 	const workers = 8
 	var wg sync.WaitGroup
 	errs := make([]error, workers)
@@ -101,7 +101,7 @@ func TestIntegrationEnsureAccountConcurrentMixedDecimals(t *testing.T) {
 
 	for i := 0; i < workers; i++ {
 		if errs[i] != nil {
-			assert.ErrorIs(t, errs[i], domain.ErrAccountConflict, "только конфликт плана, worker %d: %v", i, errs[i])
+			assert.ErrorIs(t, errs[i], domain.ErrAccountConflict, "plan conflict only, worker %d: %v", i, errs[i])
 		}
 	}
 	var accounts int64
@@ -113,7 +113,7 @@ func TestIntegrationEnsureAccountConcurrentMixedDecimals(t *testing.T) {
 	require.NoError(t, db.Model(&storage.Balance{}).
 		Where("account_id IN (?)", db.Model(&storage.Account{}).
 			Select("id").Where("merchant_ref = ?", "m-mixed")).Count(&balances).Error)
-	assert.Equal(t, int64(1), balances, "балансовый ряд только у канонического счета")
+	assert.Equal(t, int64(1), balances, "only the canonical account has a balance row")
 }
 
 func TestIntegrationEnsureAccountConflicts(t *testing.T) {
@@ -126,13 +126,13 @@ func TestIntegrationEnsureAccountConflicts(t *testing.T) {
 
 	_, err = repo.EnsureAccount(ctx, domain.MerchantAccountKey("m-1", "USDT", 6))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, domain.ErrAccountConflict, "другая шкала того же ключа - конфликт")
+	assert.ErrorIs(t, err, domain.ErrAccountConflict, "a different scale of the same key is a conflict")
 
 	_, err = repo.EnsureAccount(ctx, domain.AccountKey{
 		Type: domain.AccountTypeFee, Asset: "USDT", Decimals: 2, MerchantRef: "m-1",
 	})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, domain.ErrInvalidAccountPlan, "платформенный счет не принимает ref")
+	assert.ErrorIs(t, err, domain.ErrInvalidAccountPlan, "a platform account does not accept a ref")
 
 	_, err = repo.EnsureAccount(ctx, domain.MerchantAccountKey("m-1", "usdt", 2))
 	require.Error(t, err)
@@ -140,7 +140,7 @@ func TestIntegrationEnsureAccountConflicts(t *testing.T) {
 
 	var accounts int64
 	require.NoError(t, db.Model(&storage.Account{}).Count(&accounts).Error)
-	assert.Equal(t, int64(1), accounts, "отказы не создают счетов")
+	assert.Equal(t, int64(1), accounts, "rejections create no accounts")
 }
 
 func TestIntegrationEnsureAccountReusesLegacyRow(t *testing.T) {
@@ -151,11 +151,11 @@ func TestIntegrationEnsureAccountReusesLegacyRow(t *testing.T) {
 
 	account, err := repo.EnsureAccount(ctx, domain.MerchantAccountKey("m-legacy", "USDT", 2))
 	require.NoError(t, err)
-	assert.Equal(t, legacy.ID, account.ID, "legacy-строка со случайным id переиспользуется")
+	assert.Equal(t, legacy.ID, account.ID, "the legacy row with a random id is reused")
 
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", legacy.ID).First(&balance).Error)
-	assert.Equal(t, int64(500), balance.Available, "баланс legacy-счета не обнуляется")
+	assert.Equal(t, int64(500), balance.Available, "the legacy account balance is not zeroed")
 }
 
 func TestIntegrationEnsureAccountHealsMissingBalance(t *testing.T) {
@@ -178,7 +178,7 @@ func TestIntegrationEnsureAccountHealsMissingBalance(t *testing.T) {
 
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", account.ID).First(&balance).Error)
-	assert.Zero(t, balance.Available, "балансовый ряд досоздан провижинингом")
+	assert.Zero(t, balance.Available, "the balance row is created by provisioning")
 }
 
 func TestIntegrationEnsureAccountRefusesHealingWithEntries(t *testing.T) {
@@ -188,14 +188,14 @@ func TestIntegrationEnsureAccountRefusesHealingWithEntries(t *testing.T) {
 	fee := seedAccount(t, db, "fee", "USDT", 2, "", 0)
 	postPayment(t, repo, "pay-1:completed", "pay-1", merchant.ID, fee.ID, 100)
 
-	// Имитируем порчу: балансовый ряд счета с проводками потерян.
+	// Simulate corruption: the balance row of an account with entries is lost.
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).Delete(&storage.Balance{}).Error)
 
 	_, err := repo.EnsureAccount(context.Background(), domain.MerchantAccountKey("m-dirty", "USDT", 2))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, domain.ErrUnknownAccount, "нулевой баланс не маскирует порчу данных")
+	assert.ErrorIs(t, err, domain.ErrUnknownAccount, "a zero balance does not mask data corruption")
 
 	var balanceCount int64
 	require.NoError(t, db.Model(&storage.Balance{}).Where("account_id = ?", merchant.ID).Count(&balanceCount).Error)
-	assert.Zero(t, balanceCount, "балансовый ряд не досоздан")
+	assert.Zero(t, balanceCount, "the balance row is not created")
 }

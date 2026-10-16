@@ -1,111 +1,110 @@
-# CBL-2.2. PostTransaction с идемпотентностью и проверкой баланса
+# CBL-2.2. PostTransaction with idempotency and balance checks
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E2, Ledger |
-| Репозиторий | `cbl-ledger` |
-| Размер | L |
-| Волна и параллельная группа | W1-LEDGER |
-| Зависит от | 2.1, CF-1 |
-| Версия контрактов | `cbl-protos@cf-1` (`billing/ledger/v1`, `billing/common/v1`) |
-| Статус | done (локально, ожидает коммита) |
+| Epic | E2, Ledger |
+| Repository | `cbl-ledger` |
+| Size | L |
+| Wave and parallel group | W1-LEDGER |
+| Depends on | 2.1, CF-1 |
+| Contract version | `cbl-protos@cf-1` (`billing/ledger/v1`, `billing/common/v1`) |
+| Status | done (locally, awaiting commit) |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Основная операция леджера: сбалансированная транзакция двойной записи с идемпотентностью по
-ключу и защитой балансов от конкурентных изменений (`CBL-000`, инварианты 2 - 5).
+The main ledger operation: a balanced double-entry transaction with key idempotency and protection
+of balances from concurrent changes (`CBL-000`, invariants 2 - 5).
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: `PostTransaction` (gRPC и слой хранения), идемпотентный повтор, проверка нехватки
-средств, оптимистичные повторы при конфликте.
-Out of scope: резервы (2.4), consumer событий (2.7), публикация `ledger.events` (2.7;
-выполнена в 2.7).
+In scope: `PostTransaction` (gRPC and the storage layer), idempotent replay, insufficient funds
+check, optimistic retries on conflict.
+Out of scope: reserves (2.4), event consumer (2.7), `ledger.events` publication (2.7;
+done in 2.7).
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. Валидация: минимум две проводки, положительные суммы (int64), корректные направления,
-дебеты равны кредитам, защита сумм от переполнения (`domain.ValidateEntries`).
+FR-1. Validation: at least two entries, positive amounts (int64), valid directions,
+debits equal credits, overflow protection for amounts (`domain.ValidateEntries`).
 
-FR-2. Идемпотентность: уникальный `idempotency_key` в `transactions`; тело запроса фиксируется
-каноническим хэшем `request_hash` (миграция 00004, кодирование строк с префиксом длины).
-Повтор с тем же телом возвращает исходный `transaction_id` и остатки (`Replayed=true`),
-повторного эффекта нет; повтор с другим телом отклоняется `idempotency_key_reuse`
-(already_exists, 409). Конкурентная вставка того же ключа обрабатывается через код 23505
-и повторный поиск.
+FR-2. Idempotency: a unique `idempotency_key` in `transactions`; the request body is captured
+by the canonical hash `request_hash` (migration 00004, length-prefixed string encoding).
+A replay with the same body returns the original `transaction_id` and balances (`Replayed=true`),
+there is no repeated effect; a replay with a different body is rejected with `idempotency_key_reuse`
+(already_exists, 409). A concurrent insert of the same key is handled via code 23505
+and a repeated lookup.
 
-FR-3. Балансы: дебет уменьшает `available`, кредит увеличивает; отрицательный `available`
-запрещен для merchant и payout (`insufficient_funds`), транзитные счета (clearing, fee,
-suspense) могут уходить в минус (T-LED-03); переполнение int64 отклоняется
-(`invalid_transaction`); обновление только при совпадении `lock_version`, иначе повтор с
-экспоненциальной паузой и jitter (до 8 попыток, старт 5 мс), затем `conflict`
+FR-3. Balances: a debit decreases `available`, a credit increases it; a negative `available`
+is forbidden for merchant and payout (`insufficient_funds`), transit accounts (clearing, fee,
+suspense) may go negative (T-LED-03); int64 overflow is rejected
+(`invalid_transaction`); the update happens only on a `lock_version` match, otherwise a retry with an
+exponential pause and jitter (up to 8 attempts, a 5 ms start), then `conflict`
 (`resource_exhausted`).
 
-FR-4. Все проводки, транзакция и апдейты балансов выполняются в одной транзакции PostgreSQL;
-все счета в одной транзакции обязаны иметь один актив и decimals (`asset_mismatch`).
-Балансы обновляются в детерминированном порядке (сортировка account_id); deadlock PostgreSQL
-(40P01) повторяется наравне с конфликтом версий.
+FR-4. All entries, the transaction and the balance updates are performed in a single PostgreSQL
+transaction; all accounts in one transaction must have the same asset and decimals (`asset_mismatch`).
+Balances are updated in a deterministic order (sorted by account_id); a PostgreSQL deadlock
+(40P01) is retried on par with a version conflict.
 
-FR-5. Маппинг ошибок в gRPC: `idempotency_key_reuse` (already_exists), `account_not_found`
-(not_found), `insufficient_funds` (failed_precondition), `unbalanced_transaction` и
-`invalid_transaction` (invalid_argument), `conflict` (resource_exhausted), прочее (internal
-без деталей).
+FR-5. Error mapping to gRPC: `idempotency_key_reuse` (already_exists), `account_not_found`
+(not_found), `insufficient_funds` (failed_precondition), `unbalanced_transaction` and
+`invalid_transaction` (invalid_argument), `conflict` (resource_exhausted), everything else (internal
+without details).
 
-## 4. Контракты
+## 4. Contracts
 
-`LedgerService.PostTransaction` из `billing/ledger/v1`: `EntryInput{account_id, direction,
-amount: Money}` -> `transaction_id`, `balances_after[]`. Ответ собирается транспортом из
-снапшотов балансов.
+`LedgerService.PostTransaction` from `billing/ledger/v1`: `EntryInput{account_id, direction,
+amount: Money}` -> `transaction_id`, `balances_after[]`. The response is assembled by the transport
+from balance snapshots.
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
-Миграции 00004 (`request_hash`) и 00005 (триггер запрета отрицательного баланса) из задачи
-2.1; новых таблиц нет.
+Migrations 00004 (`request_hash`) and 00005 (the trigger forbidding a negative balance) from task
+2.1; there are no new tables.
 
-## 6. Конечные автоматы
+## 6. State machines
 
-Не применимо; транзакция атомарна.
+Not applicable; the transaction is atomic.
 
 ## 7. Edge cases
 
-Повтор с тем же ключом после успеха, конкурентный повтор, недостаток средств, отрицательный
-баланс запрещен, несуществующий счет, разные активы, пустой ключ, невалидные направления,
-переполнение сумм, большое количество проводок (одна транзакция).
+A replay with the same key after success, a concurrent replay, insufficient funds, a negative
+balance forbidden, a nonexistent account, different assets, an empty key, invalid directions,
+amount overflow, a large number of entries (one transaction).
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-Горячие счета: оптимистичные повторы без глобальных локов; `SELECT ... FOR UPDATE` не
-используется. Целевая задержка и TPS подтверждаются бенчмарком 2.9.
+Hot accounts: optimistic retries without global locks; `SELECT ... FOR UPDATE` is not used. The
+target latency and TPS are confirmed by benchmark 2.9.
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
-| Smoke | `go build ./...`, запуск сервиса с PostgreSQL, healthz=ok, миграции применены |
-| Unit | `domain.ValidateEntries`: границы, дисбаланс, переполнение, направления |
-| Integration | проводка и балансы; повтор ключа; отклонения (дисбаланс, нехватка, чужой счет, активы); триггер append-only; 10 конкурентных дебетов без отрицательного баланса |
-| E2E | локальный compose леджера (выполнен вручную: healthz, goose-версии) |
-| Load | задача 2.9 |
+| Smoke | `go build ./...`, service startup with PostgreSQL, healthz=ok, migrations applied |
+| Unit | `domain.ValidateEntries`: boundaries, imbalance, overflow, directions |
+| Integration | posting and balances; key replay; rejections (imbalance, shortage, foreign account, assets); append-only trigger; 10 concurrent debits without a negative balance |
+| E2E | local ledger compose (run manually: healthz, goose versions) |
+| Load | task 2.9 |
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-Коммит `CBL-2.2: PostTransaction с идемпотентностью и проверкой баланса`; спеки 2.1 и 2.2
-входят в коммиты соответствующих задач (допускается объединение по решению заказчика).
+Commit `CBL-2.2: PostTransaction with idempotency and balance checks`; specs 2.1 and 2.2
+are part of the commits of the respective tasks (merging is allowed at the customer's decision).
 
-## 11. Открытые вопросы
+## 11. Open questions
 
-- Возврат остатков при повторе отражает текущее состояние балансов, а не снимок на момент
-  первой проводки; для строгой идемпотентности ответа потребуется таблица снимков (2.5).
+- Returning balances on a replay reflects the current balance state rather than a snapshot at the
+  time of the first posting; strict response idempotency will require a snapshot table (2.5).
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (13 - 14.10.2026). Итог: 2 блокера, 7 major, серия minor; все
-blocker и major закрыты.
+Four independent passes (13 - 14.10.2026). Result: 2 blockers, 7 major, a series of minor findings;
+all blocker and major findings are closed.
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | паника при UUID счета в другом регистре; нет тестов конфликтов ключа | нормализация UUID (`normalizeEntries`), тесты конфликта и конкурентного ключа |
-| Архитектуры | повтор ключа с другим телом молча возвращал чужой результат (нарушение CBL-003); deadlock при недетерминированном порядке апдейтов; запрет минуса ломал поток Dr clearing / Cr merchant; логика в storage | `request_hash` (миграция 00004) + `idempotency_key_reuse` (409); сортировка счетов и ретрай 40P01; политика по типам счетов (merchant/payout только); trade-off T-LED-01 |
-| С контекстом | покрытие 67.96% (ниже 80%), Docker-сборка не работала (`replace` вне контекста), middleware не подключены, govulncheck красный | покрытие 90.7% (unit + bufconn integration); Dockerfile и compose переведены на контекст services/ (сборка проверена); ginmw/grpcmw подключены; Go 1.26 и зависимости обновлены |
-| Безопасности | BLOCK: идемпотентная подмена результата и достижимые уязвимости grpc/pgx/x-net | закрыто: хэш тела + 409, обновление зависимостей; принятые KI: отсутствие mTLS (0.6), входные лимиты добавлены (100 проводок, длины полей, MaxRecvMsgSize) |
-
+| No-context | a panic on an account UUID in a different case; no tests for key conflicts | UUID normalization (`normalizeEntries`), tests for the conflict and the concurrent key |
+| Architecture | a key replay with a different body silently returned a foreign result (a CBL-003 violation); deadlock under a nondeterministic update order; the minus prohibition broke the Dr clearing / Cr merchant flow; logic in storage | `request_hash` (migration 00004) + `idempotency_key_reuse` (409); account sorting and the 40P01 retry; an account type policy (merchant/payout only); trade-off T-LED-01 |
+| With-context | coverage 67.96% (below 80%), the Docker build did not work (`replace` outside the context), middleware not wired, govulncheck red | coverage 90.7% (unit + bufconn integration); the Dockerfile and compose switched to the services/ context (the build verified); ginmw/grpcmw wired; Go 1.26 and dependencies updated |
+| Security | BLOCK: idempotent result substitution and reachable grpc/pgx/x-net vulnerabilities | closed: body hash + 409, dependency updates; accepted KIs: no mTLS (0.6), input limits added (100 entries, field lengths, MaxRecvMsgSize) |

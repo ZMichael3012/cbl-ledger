@@ -16,7 +16,7 @@ import (
 	"github.com/cbl/cbl-ledger/internal/storage"
 )
 
-// entriesPair собирает сбалансированную пару проводок между счетами.
+// entriesPair builds a balanced pair of entries between accounts.
 func entriesPair(debitAccountID, creditAccountID string, amount int64) []domain.EntryInput {
 	return []domain.EntryInput{
 		{AccountID: debitAccountID, Direction: domain.DirectionDebit, Amount: amount},
@@ -24,10 +24,11 @@ func entriesPair(debitAccountID, creditAccountID string, amount int64) []domain.
 	}
 }
 
-// BenchmarkPostTransactionHotAccountParallel измеряет параллельную запись в одну пару
-// счетов: все транзакции конкурируют за одну строку баланса, конфликты разрешаются
-// повторами 2.3. Метрики: retries_per_op - число событий повторов на операцию,
-// conflicts_% - доля проводок, исчерпавших бюджет повторов (ErrConflict).
+// BenchmarkPostTransactionHotAccountParallel measures parallel writes to a single pair
+// of accounts: all transactions contend for one balance row, and conflicts are resolved
+// by the retries of 2.3. Metrics: retries_per_op is the number of retry events per
+// operation, conflicts_% is the share of transactions that exhausted the retry budget
+// (ErrConflict).
 func BenchmarkPostTransactionHotAccountParallel(b *testing.B) {
 	db := setupLedgerDB(b)
 	var retries, exhausted atomic.Int64
@@ -61,9 +62,9 @@ func BenchmarkPostTransactionHotAccountParallel(b *testing.B) {
 	b.ReportMetric(float64(exhausted.Load())/float64(b.N)*100, "conflicts_%")
 }
 
-// BenchmarkSingleRowUpdateHotBalance измеряет потолок сериализации на блокировке строки:
-// одиночный UPDATE без CAS и повторов. Верхняя граница для пессимистичной стратегии
-// горячего счета (сравнение в отчете CBL-2.9).
+// BenchmarkSingleRowUpdateHotBalance measures the serialization ceiling on a row lock:
+// a single UPDATE without CAS and retries. An upper bound for a pessimistic hot-account
+// strategy (comparison in the CBL-2.9 report).
 func BenchmarkSingleRowUpdateHotBalance(b *testing.B) {
 	db := setupLedgerDB(b)
 	merchant := seedAccount(b, db, "merchant", "USDT", 2, "bench-lock", 1<<60)
@@ -83,8 +84,8 @@ func BenchmarkSingleRowUpdateHotBalance(b *testing.B) {
 	})
 }
 
-// setupManyEntries готовит базу, репозиторий и проводку из 100 входов (лимит 2.2):
-// 50 счетов дебетуются, 50 кредитуются на равные суммы.
+// setupManyEntries prepares the database, the repository and a transaction of 100 entries
+// (the limit of 2.2): 50 accounts are debited and 50 are credited with equal amounts.
 func setupManyEntries(b *testing.B) (*gorm.DB, *storage.Repository, []domain.EntryInput) {
 	b.Helper()
 	db := setupLedgerDB(b)
@@ -101,7 +102,7 @@ func setupManyEntries(b *testing.B) (*gorm.DB, *storage.Repository, []domain.Ent
 	return db, repo, entries
 }
 
-// runManyEntries выполняет проводки из 100 входов.
+// runManyEntries posts transactions of 100 entries.
 func runManyEntries(b *testing.B, repo *storage.Repository, entries []domain.EntryInput) {
 	ctx := context.Background()
 	b.ResetTimer()
@@ -113,16 +114,17 @@ func runManyEntries(b *testing.B, repo *storage.Repository, entries []domain.Ent
 	}
 }
 
-// BenchmarkPostTransactionManyEntries измеряет проводку из 100 входов с работающим
-// deferred-триггером 00006: закрывает открытый вопрос 2.3 о стоимости триггера
-// на многоentry-транзакциях.
+// BenchmarkPostTransactionManyEntries measures a transaction of 100 entries with the
+// deferred trigger 00006 enabled: it closes the open question of 2.3 about the trigger
+// cost on many-entry transactions.
 func BenchmarkPostTransactionManyEntries(b *testing.B) {
 	_, repo, entries := setupManyEntries(b)
 	runManyEntries(b, repo, entries)
 }
 
-// BenchmarkPostTransactionManyEntriesNoTrigger измеряет ту же проводку с отключенным
-// триггером 00006: разница с BenchmarkPostTransactionManyEntries - стоимость барьера.
+// BenchmarkPostTransactionManyEntriesNoTrigger measures the same transaction with the
+// trigger 00006 disabled: the difference from BenchmarkPostTransactionManyEntries is
+// the barrier cost.
 func BenchmarkPostTransactionManyEntriesNoTrigger(b *testing.B) {
 	db, repo, entries := setupManyEntries(b)
 	if err := db.Exec("ALTER TABLE entries DISABLE TRIGGER entries_transaction_balanced_trigger").Error; err != nil {
@@ -131,9 +133,9 @@ func BenchmarkPostTransactionManyEntriesNoTrigger(b *testing.B) {
 	runManyEntries(b, repo, entries)
 }
 
-// BenchmarkPostTransactionDistributedAccounts измеряет параллельную запись по 64 парам
-// счетов без общего горячего счета: потолок слоя storage и PostgreSQL без contention
-// (транспорт gRPC измеряется k6-сценарием).
+// BenchmarkPostTransactionDistributedAccounts measures parallel writes across 64 pairs
+// of accounts without a shared hot account: the ceiling of the storage layer and
+// PostgreSQL without contention (the gRPC transport is measured by the k6 scenario).
 func BenchmarkPostTransactionDistributedAccounts(b *testing.B) {
 	db := setupLedgerDB(b)
 	repo := storage.NewRepository(db, zap.NewNop())

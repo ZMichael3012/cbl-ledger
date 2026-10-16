@@ -57,8 +57,8 @@ func TestAccountKeyValidate(t *testing.T) {
 func TestDeriveAccountIDGoldenVectors(t *testing.T) {
 	t.Parallel()
 
-	// Векторы фиксируют кросс-сервисный контракт (CBL-003, план счетов):
-	// их обязаны воспроизводить все реализации вывода account_id.
+	// The vectors pin the cross-service contract (CBL-003, account plan):
+	// all account_id derivation implementations must reproduce them.
 	vectors := []struct {
 		key domain.AccountKey
 		id  string
@@ -75,7 +75,7 @@ func TestDeriveAccountIDGoldenVectors(t *testing.T) {
 	for _, vector := range vectors {
 		id, err := domain.DeriveAccountID(vector.key)
 		require.NoError(t, err)
-		assert.Equal(t, vector.id, id.String(), "ключ %s", vector.key.CanonicalName())
+		assert.Equal(t, vector.id, id.String(), "key %s", vector.key.CanonicalName())
 	}
 }
 
@@ -86,15 +86,15 @@ func TestDeriveAccountIDDeterministic(t *testing.T) {
 	require.NoError(t, err)
 	second, err := domain.DeriveAccountID(domain.MerchantAccountKey("m-1", "USDT", 2))
 	require.NoError(t, err)
-	assert.Equal(t, first, second, "одинаковый ключ дает одинаковый id")
+	assert.Equal(t, first, second, "the same key yields the same id")
 
 	otherDecimals, err := domain.DeriveAccountID(domain.MerchantAccountKey("m-1", "USDT", 6))
 	require.NoError(t, err)
-	assert.NotEqual(t, first, otherDecimals, "decimals входит в ключ")
+	assert.NotEqual(t, first, otherDecimals, "decimals is part of the key")
 
 	otherType, err := domain.DeriveAccountID(domain.PayoutAccountKey("m-1", "USDT", 2))
 	require.NoError(t, err)
-	assert.NotEqual(t, first, otherType, "тип входит в ключ")
+	assert.NotEqual(t, first, otherType, "the type is part of the key")
 
 	_, err = domain.DeriveAccountID(domain.AccountKey{Type: "vault", Asset: "USDT", Decimals: 2})
 	require.Error(t, err)
@@ -117,11 +117,11 @@ func TestValidMerchantRef(t *testing.T) {
 
 	valid := []string{"m-1", "merchant_01", "A", strings.Repeat("a", 128)}
 	for _, ref := range valid {
-		assert.True(t, domain.ValidMerchantRef(ref), "ссылка %q", ref)
+		assert.True(t, domain.ValidMerchantRef(ref), "ref %q", ref)
 	}
 
 	invalid := []string{"", " ", "m 1", "m:1", "м-1", strings.Repeat("a", 129), "m\t1"}
 	for _, ref := range invalid {
-		assert.False(t, domain.ValidMerchantRef(ref), "ссылка %q", ref)
+		assert.False(t, domain.ValidMerchantRef(ref), "ref %q", ref)
 	}
 }

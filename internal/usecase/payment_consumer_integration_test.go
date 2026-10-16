@@ -58,8 +58,8 @@ func setupPaymentDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-// setupPaymentProcessor собирает конвейер как в main: репозиторий с sink,
-// ledger, consumer и процессор inbox с dedup-барьером.
+// setupPaymentProcessor assembles the pipeline as in main: the repository with the sink,
+// the ledger, the consumer and the inbox processor with the dedup barrier.
 func setupPaymentProcessor(t *testing.T, db *gorm.DB) (*inbox.Processor, *storage.Repository) {
 	t.Helper()
 	repo := storage.NewRepository(db, zap.NewNop(),
@@ -103,11 +103,11 @@ func TestIntegrationPaymentCompletedPosting(t *testing.T) {
 
 	merchant, err := repo.GetBalance(ctx, accountID(t, domain.MerchantAccountKey("m-1", "USDT", 2)))
 	require.NoError(t, err)
-	assert.Equal(t, int64(98_500), merchant.Available, "кредит мерчанта за вычетом комиссии")
+	assert.Equal(t, int64(98_500), merchant.Available, "merchant credit net of the fee")
 
 	clearing, err := repo.GetBalance(ctx, accountID(t, domain.PlatformAccountKey(domain.AccountTypeClearing, "USDT", 2)))
 	require.NoError(t, err)
-	assert.Equal(t, int64(-100_000), clearing.Available, "транзитный clearing уходит в минус")
+	assert.Equal(t, int64(-100_000), clearing.Available, "the transit clearing account goes negative")
 
 	fee, err := repo.GetBalance(ctx, accountID(t, domain.PlatformAccountKey(domain.AccountTypeFee, "USDT", 2)))
 	require.NoError(t, err)
@@ -115,19 +115,19 @@ func TestIntegrationPaymentCompletedPosting(t *testing.T) {
 
 	assert.Equal(t, int64(1), countRows(t, db, &storage.Transaction{}))
 	assert.Equal(t, int64(3), countRows(t, db, &storage.Entry{}))
-	assert.Equal(t, int64(3), countRows(t, db, &storage.TransactionBalance{}), "снимки после проводки записаны")
+	assert.Equal(t, int64(3), countRows(t, db, &storage.TransactionBalance{}), "balance snapshots after the posting are written")
 
 	var record outbox.Record
 	require.NoError(t, db.Where("topic = ?", TopicLedgerEvents).First(&record).Error)
 	assert.Equal(t, storage.EventTransactionPosted, record.Headers[outbox.HeaderEventType])
 	assert.Equal(t, ProducerLedger, record.Headers[outbox.HeaderProducer])
-	assert.Equal(t, traceparent, record.Headers[outbox.HeaderTraceparent], "traceparent источника пробрасывается")
+	assert.Equal(t, traceparent, record.Headers[outbox.HeaderTraceparent], "the source traceparent is propagated")
 	keys := []string{
 		accountID(t, domain.MerchantAccountKey("m-1", "USDT", 2)),
 		accountID(t, domain.PlatformAccountKey(domain.AccountTypeClearing, "USDT", 2)),
 		accountID(t, domain.PlatformAccountKey(domain.AccountTypeFee, "USDT", 2)),
 	}
-	assert.Equal(t, minString(keys), record.Key, "ключ партиции - минимальный account_id")
+	assert.Equal(t, minString(keys), record.Key, "the partition key is the minimum account_id")
 
 	var payload eventsv1.LedgerEvent
 	require.NoError(t, proto.Unmarshal(record.Payload, &payload))
@@ -136,16 +136,16 @@ func TestIntegrationPaymentCompletedPosting(t *testing.T) {
 	assert.Equal(t, paymentID, payload.GetRefId())
 	require.Len(t, payload.GetEntries(), 3)
 
-	// Дубликат по event_id подавлен inbox-барьером.
+	// A duplicate by event_id is suppressed by the inbox barrier.
 	require.NoError(t, processor.Process(ctx, message))
-	assert.Equal(t, int64(1), countRows(t, db, &storage.Transaction{}), "дубликат не создает проводку")
+	assert.Equal(t, int64(1), countRows(t, db, &storage.Transaction{}), "the duplicate does not create a posting")
 	assert.Equal(t, int64(1), countRows(t, db, &outbox.Record{}))
 
-	// Повтор уведомления с новым event_id идемпотентен по бизнес-ключу.
+	// A repeated notification with a new event_id is idempotent by the business key.
 	replay := paymentMessage(t, event, "")
 	require.NoError(t, processor.Process(ctx, replay))
-	assert.Equal(t, int64(1), countRows(t, db, &storage.Transaction{}), "replay не создает вторую проводку")
-	assert.Equal(t, int64(1), countRows(t, db, &outbox.Record{}), "replay не публикует событие повторно")
+	assert.Equal(t, int64(1), countRows(t, db, &storage.Transaction{}), "replay does not create a second posting")
+	assert.Equal(t, int64(1), countRows(t, db, &outbox.Record{}), "replay does not publish the event again")
 	assert.Equal(t, int64(2), countRows(t, db, &inbox.Record{}))
 }
 
@@ -154,7 +154,7 @@ func TestIntegrationPaymentCompletedTemplates(t *testing.T) {
 	processor, repo := setupPaymentProcessor(t, db)
 	ctx := context.Background()
 
-	// Без комиссии: две проводки.
+	// Without a fee: two entries.
 	noFee := completedEvent("01a138fd-0000-7000-8000-000000000102", "m-2", 50_000, nil)
 	require.NoError(t, processor.Process(ctx, paymentMessage(t, noFee, "")))
 	assert.Equal(t, int64(1), countRows(t, db, &storage.Transaction{}))
@@ -163,7 +163,7 @@ func TestIntegrationPaymentCompletedTemplates(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(50_000), merchant.Available)
 
-	// Комиссия равна полученному: мерчантского кредита нет.
+	// The fee equals the received amount: there is no merchant credit.
 	fullFee := completedEvent("01a138fd-0000-7000-8000-000000000103", "m-3", 100,
 		&commonv1.Money{MinorUnits: 100, Asset: "USDT", Decimals: 2})
 	require.NoError(t, processor.Process(ctx, paymentMessage(t, fullFee, "")))
@@ -173,27 +173,27 @@ func TestIntegrationPaymentCompletedTemplates(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, merchant.Available)
 
-	// Незавершенные типы подтверждаются без эффекта, включая пустой enum.
+	// Non-completed types are acknowledged without effect, including the empty enum.
 	detected := completedEvent("01a138fd-0000-7000-8000-000000000104", "m-4", 100, nil)
 	detected.Type = eventsv1.PaymentEventType_PAYMENT_EVENT_TYPE_DETECTED
 	require.NoError(t, processor.Process(ctx, paymentMessage(t, detected, "")))
 
 	unspecified := completedEvent("01a138fd-0000-7000-8000-000000000105", "m-4", 100, nil)
 	unspecified.Type = eventsv1.PaymentEventType_PAYMENT_EVENT_TYPE_UNSPECIFIED
-	require.NoError(t, processor.Process(ctx, paymentMessage(t, unspecified, "")), "пустой enum пропускается")
+	require.NoError(t, processor.Process(ctx, paymentMessage(t, unspecified, "")), "the empty enum is skipped")
 
 	unknownEnum := completedEvent("01a138fd-0000-7000-8000-000000000106", "m-4", 100, nil)
 	unknownEnum.Type = eventsv1.PaymentEventType(99)
-	require.NoError(t, processor.Process(ctx, paymentMessage(t, unknownEnum, "")), "неизвестный тип пропускается")
+	require.NoError(t, processor.Process(ctx, paymentMessage(t, unknownEnum, "")), "the unknown type is skipped")
 
-	// Некорректный traceparent не пробрасывается в конверт.
+	// An invalid traceparent is not propagated into the envelope.
 	badTrace := completedEvent("01a138fd-0000-7000-8000-000000000107", "m-5", 100, nil)
 	require.NoError(t, processor.Process(ctx, paymentMessage(t, badTrace, "not-a-traceparent")))
 	var lastRecord outbox.Record
 	require.NoError(t, db.Order("id DESC").First(&lastRecord).Error)
-	assert.Empty(t, lastRecord.Headers[outbox.HeaderTraceparent], "невалидный traceparent игнорируется")
+	assert.Empty(t, lastRecord.Headers[outbox.HeaderTraceparent], "an invalid traceparent is ignored")
 
-	// Некорректные события отклоняются детерминированно.
+	// Invalid events are rejected deterministically.
 	broken := completedEvent("not-a-uuid", "m-4", 100, nil)
 	require.Error(t, processor.Process(ctx, paymentMessage(t, broken, "")))
 
@@ -205,7 +205,7 @@ func TestIntegrationPaymentCompletedTemplates(t *testing.T) {
 	}
 	require.Error(t, processor.Process(ctx, corrupt))
 
-	assert.Equal(t, int64(3), countRows(t, db, &storage.Transaction{}), "отказы и пропуски не создают проводок")
+	assert.Equal(t, int64(3), countRows(t, db, &storage.Transaction{}), "rejections and skips do not create postings")
 }
 
 func TestIntegrationReserveLifecycleEvents(t *testing.T) {
@@ -246,7 +246,7 @@ func TestIntegrationReserveLifecycleEvents(t *testing.T) {
 	}
 	for i, record := range records {
 		assert.Equal(t, wantTypes[i], record.Headers[outbox.HeaderEventType])
-		assert.Equal(t, merchant.ID, record.Key, "ключ события резерва - счет удержания")
+		assert.Equal(t, merchant.ID, record.Key, "the reserve event key is the hold account")
 	}
 
 	var committed eventsv1.LedgerEvent
@@ -269,8 +269,8 @@ func TestIntegrationPaymentConcurrentDelivery(t *testing.T) {
 	const paymentID = "01a138fd-0000-7000-8000-000000000108"
 	event := completedEvent(paymentID, "m-concurrent", 10_000, nil)
 
-	// Два разных event_id одного платежа и дубликат одного event_id обрабатываются
-	// конкурентно: эффект обязан остаться ровно один.
+	// Two different event_ids of one payment and a duplicate of one event_id are processed
+	// concurrently: exactly one effect must remain.
 	first := paymentMessage(t, event, "")
 	second := paymentMessage(t, event, "")
 	duplicate := first
@@ -289,13 +289,13 @@ func TestIntegrationPaymentConcurrentDelivery(t *testing.T) {
 		require.NoError(t, err, "worker %d", i)
 	}
 
-	assert.Equal(t, int64(1), countRows(t, db, &storage.Transaction{}), "ровно одна проводка")
-	assert.Equal(t, int64(1), countRows(t, db, &outbox.Record{}), "ровно одно событие")
+	assert.Equal(t, int64(1), countRows(t, db, &storage.Transaction{}), "exactly one posting")
+	assert.Equal(t, int64(1), countRows(t, db, &outbox.Record{}), "exactly one event")
 	account := accountID(t, domain.MerchantAccountKey("m-concurrent", "USDT", 2))
 	assert.Equal(t, int64(10_000), balanceOf(t, db, account))
 }
 
-// balanceOf читает доступный баланс счета.
+// balanceOf reads the available balance of an account.
 func balanceOf(t *testing.T, db *gorm.DB, accountID string) int64 {
 	t.Helper()
 	var balance storage.Balance
@@ -303,7 +303,7 @@ func balanceOf(t *testing.T, db *gorm.DB, accountID string) int64 {
 	return balance.Available
 }
 
-// accountID возвращает детерминированный идентификатор счета по плану (2.6).
+// accountID returns the deterministic account identifier from the account plan (2.6).
 func accountID(t *testing.T, key domain.AccountKey) string {
 	t.Helper()
 	id, err := domain.DeriveAccountID(key)
@@ -311,7 +311,7 @@ func accountID(t *testing.T, key domain.AccountKey) string {
 	return id.String()
 }
 
-// minString возвращает минимальную строку набора.
+// minString returns the minimum string of the set.
 func minString(values []string) string {
 	minimum := values[0]
 	for _, value := range values[1:] {

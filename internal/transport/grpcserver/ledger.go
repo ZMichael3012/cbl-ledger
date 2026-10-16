@@ -1,5 +1,5 @@
-// Пакет grpcserver содержит gRPC-транспортный слой сервиса ledger:
-// валидацию недоверенного ввода и маппинг доменных ошибок в gRPC-статусы.
+// Package grpcserver contains the gRPC transport layer of the ledger service:
+// validation of untrusted input and mapping of domain errors to gRPC statuses.
 package grpcserver
 
 import (
@@ -23,7 +23,7 @@ import (
 	"github.com/cbl/cbl-ledger/internal/usecase"
 )
 
-// Пределы недоверенного ввода транспорта.
+// Limits of untrusted input at the transport layer.
 const (
 	maxIdempotencyKeyLen = 128
 	maxRefFieldLen       = 128
@@ -32,18 +32,18 @@ const (
 	maxCursorLen         = 64
 )
 
-// Ledger реализует gRPC-сервис LedgerService.
+// Ledger implements the gRPC service LedgerService.
 type Ledger struct {
 	ledgerv1.UnimplementedLedgerServiceServer
 	svc *usecase.Ledger
 }
 
-// NewLedger создает сервер LedgerService.
+// NewLedger creates the LedgerService server.
 func NewLedger(svc *usecase.Ledger) *Ledger {
 	return &Ledger{svc: svc}
 }
 
-// validateIdempotencyKey проверяет ключ идемпотентности недоверенного запроса.
+// validateIdempotencyKey validates the idempotency key of an untrusted request.
 func validateIdempotencyKey(key string) error {
 	if strings.TrimSpace(key) == "" {
 		return grpcmw.E(grpcmw.KindInvalidArgument, "missing_idempotency_key", "idempotency_key обязателен", nil)
@@ -54,7 +54,7 @@ func validateIdempotencyKey(key string) error {
 	return nil
 }
 
-// validateReserveID проверяет идентификатор резерва недоверенного запроса.
+// validateReserveID validates the reserve identifier of an untrusted request.
 func validateReserveID(reserveID string) error {
 	if _, err := uuid.Parse(strings.TrimSpace(reserveID)); err != nil {
 		return grpcmw.E(grpcmw.KindInvalidArgument, "invalid_reserve_id", "reserve_id не UUID", nil)
@@ -62,9 +62,9 @@ func validateReserveID(reserveID string) error {
 	return nil
 }
 
-// PostTransaction выполняет сбалансированную транзакцию двойной записи.
-// Повтор с тем же idempotency_key возвращает исходную транзакцию без повторного
-// эффекта; повтор с другим телом отклоняется `idempotency_key_reuse`.
+// PostTransaction executes a balanced double-entry transaction.
+// A retry with the same idempotency_key returns the original transaction without
+// a repeated effect; a retry with a different body is rejected with `idempotency_key_reuse`.
 func (s *Ledger) PostTransaction(ctx context.Context, req *ledgerv1.PostTransactionRequest) (*ledgerv1.PostTransactionResponse, error) {
 	if err := validateIdempotencyKey(req.GetIdempotencyKey()); err != nil {
 		return nil, err
@@ -115,8 +115,8 @@ func (s *Ledger) PostTransaction(ctx context.Context, req *ledgerv1.PostTransact
 	return resp, nil
 }
 
-// Reserve создает удержание средств на счете мерчанта.
-// Повтор с тем же idempotency_key возвращает исходный резерв без повторного эффекта.
+// Reserve creates a hold of funds on the merchant account.
+// A retry with the same idempotency_key returns the original reserve without a repeated effect.
 func (s *Ledger) Reserve(ctx context.Context, req *ledgerv1.ReserveRequest) (*ledgerv1.ReserveResponse, error) {
 	if err := validateIdempotencyKey(req.GetIdempotencyKey()); err != nil {
 		return nil, err
@@ -143,9 +143,9 @@ func (s *Ledger) Reserve(ctx context.Context, req *ledgerv1.ReserveRequest) (*le
 		IdempotencyKey: req.GetIdempotencyKey(),
 		AccountID:      accountID,
 		Asset:          req.GetAmount().GetAsset(),
-		// Приведение uint32 к int32 может дать отрицательное значение при мусорном
-		// входе: сверка со счетом отклонит его как asset_mismatch.
-		Decimals: int32(req.GetAmount().GetDecimals()), //nolint:gosec // G115: переполнение отсекает сверка decimals счета
+		// Casting uint32 to int32 may yield a negative value on garbage
+		// input: the comparison with the account rejects it as asset_mismatch.
+		Decimals: int32(req.GetAmount().GetDecimals()), //nolint:gosec // G115: overflow is cut off by the account decimals comparison
 		Amount:   req.GetAmount().GetMinorUnits(),
 		RefID:    req.GetRefId(),
 	})
@@ -155,8 +155,8 @@ func (s *Ledger) Reserve(ctx context.Context, req *ledgerv1.ReserveRequest) (*le
 	return &ledgerv1.ReserveResponse{ReserveId: result.ReserveID, Status: mapReserveStatus(result.Status)}, nil
 }
 
-// CommitReserve захватывает удержание: резерв превращается в проводку на счет выплат.
-// Повтор в статусе committed идемпотентен, захват released резерва отклоняется.
+// CommitReserve captures the hold: the reserve turns into an entry to the payout account.
+// A retry in the committed status is idempotent, capturing a released reserve is rejected.
 func (s *Ledger) CommitReserve(ctx context.Context, req *ledgerv1.CommitReserveRequest) (*ledgerv1.CommitReserveResponse, error) {
 	if err := validateIdempotencyKey(req.GetIdempotencyKey()); err != nil {
 		return nil, err
@@ -174,8 +174,8 @@ func (s *Ledger) CommitReserve(ctx context.Context, req *ledgerv1.CommitReserveR
 	return &ledgerv1.CommitReserveResponse{ReserveId: result.ReserveID, Status: mapReserveStatus(result.Status)}, nil
 }
 
-// ReleaseReserve возвращает удержанные средства на доступный баланс счета.
-// Повтор в статусе released идемпотентен, возврат committed резерва отклоняется.
+// ReleaseReserve returns the held funds to the available balance of the account.
+// A retry in the released status is idempotent, releasing a committed reserve is rejected.
 func (s *Ledger) ReleaseReserve(ctx context.Context, req *ledgerv1.ReleaseReserveRequest) (*ledgerv1.ReleaseReserveResponse, error) {
 	if err := validateIdempotencyKey(req.GetIdempotencyKey()); err != nil {
 		return nil, err
@@ -197,7 +197,7 @@ func (s *Ledger) ReleaseReserve(ctx context.Context, req *ledgerv1.ReleaseReserv
 	return &ledgerv1.ReleaseReserveResponse{ReserveId: result.ReserveID, Status: mapReserveStatus(result.Status)}, nil
 }
 
-// GetBalance возвращает доступный и зарезервированный остаток счета.
+// GetBalance returns the available and reserved balance of the account.
 func (s *Ledger) GetBalance(ctx context.Context, req *ledgerv1.GetBalanceRequest) (*ledgerv1.GetBalanceResponse, error) {
 	accountID := strings.TrimSpace(req.GetAccountId())
 	if _, err := uuid.Parse(accountID); err != nil {
@@ -214,10 +214,10 @@ func (s *Ledger) GetBalance(ctx context.Context, req *ledgerv1.GetBalanceRequest
 	}}, nil
 }
 
-// ListEntries возвращает страницу выписки по счету или мерчанту (2.10).
-// Заполняется account_id или merchant_ref; merchant_ref ограничивает выписку
-// счетами мерчанта, период фильтрует created_at транзакции (from включительно,
-// to исключительно).
+// ListEntries returns a page of the statement by account or merchant (2.10).
+// Either account_id or merchant_ref is filled in; merchant_ref limits the statement
+// to the merchant accounts, the period filters the transaction created_at (from
+// inclusive, to exclusive).
 func (s *Ledger) ListEntries(ctx context.Context, req *ledgerv1.ListEntriesRequest) (*ledgerv1.ListEntriesResponse, error) {
 	accountID := strings.TrimSpace(req.GetAccountId())
 	merchantRef := strings.TrimSpace(req.GetMerchantRef())
@@ -273,8 +273,8 @@ func (s *Ledger) ListEntries(ctx context.Context, req *ledgerv1.ListEntriesReque
 	return response, nil
 }
 
-// ListMerchantAccounts возвращает счета мерчанта с балансами (2.10):
-// предпосылка 7.4 для балансов и ownership счетов BFF.
+// ListMerchantAccounts returns the merchant accounts with balances (2.10):
+// a prerequisite of 7.4 for balances and account ownership in the BFF.
 func (s *Ledger) ListMerchantAccounts(ctx context.Context, req *ledgerv1.ListMerchantAccountsRequest) (*ledgerv1.ListMerchantAccountsResponse, error) {
 	merchantRef := strings.TrimSpace(req.GetMerchantRef())
 	if merchantRef == "" {
@@ -301,8 +301,8 @@ func (s *Ledger) ListMerchantAccounts(ctx context.Context, req *ledgerv1.ListMer
 	return response, nil
 }
 
-// optionalTimestamp переводит необязательную временную границу запроса;
-// невалидная метка отклоняется единым кодом invalid_period.
+// optionalTimestamp converts an optional time boundary of the request;
+// an invalid timestamp is rejected with the single code invalid_period.
 func optionalTimestamp(ts *timestamppb.Timestamp) (*time.Time, error) {
 	if ts == nil {
 		return nil, nil
@@ -314,12 +314,12 @@ func optionalTimestamp(ts *timestamppb.Timestamp) (*time.Time, error) {
 	return &value, nil
 }
 
-// moneyValue собирает контрактную сумму с активом и decimals счета.
+// moneyValue builds the contract amount with the asset and the account decimals.
 func moneyValue(units int64, asset string, decimals int32) *commonv1.Money {
 	return &commonv1.Money{MinorUnits: units, Asset: asset, Decimals: decimalsToUint32(decimals)}
 }
 
-// directionToProto переводит доменное направление в контрактное.
+// directionToProto converts the domain direction to the contract one.
 func directionToProto(direction domain.Direction) commonv1.Direction {
 	switch direction {
 	case domain.DirectionDebit:
@@ -331,7 +331,7 @@ func directionToProto(direction domain.Direction) commonv1.Direction {
 	}
 }
 
-// mapReserveStatus переводит доменный статус резерва в контрактный.
+// mapReserveStatus converts the domain reserve status to the contract one.
 func mapReserveStatus(status domain.ReserveStatus) ledgerv1.ReserveStatus {
 	switch status {
 	case domain.ReserveStatusActive:
@@ -345,8 +345,8 @@ func mapReserveStatus(status domain.ReserveStatus) ledgerv1.ReserveStatus {
 	}
 }
 
-// decimalsToUint32 безопасно переводит decimals счета в uint32 контракта.
-// Отрицательные значения невозможны по CHECK-ограничению БД, но защита нужна линтеру.
+// decimalsToUint32 safely converts the account decimals to the contract uint32.
+// Negative values are impossible due to the DB CHECK constraint, but the guard is needed for the linter.
 func decimalsToUint32(decimals int32) uint32 {
 	if decimals < 0 {
 		return 0
@@ -354,7 +354,7 @@ func decimalsToUint32(decimals int32) uint32 {
 	return uint32(decimals)
 }
 
-// mapDirection переводит контрактное направление в доменное.
+// mapDirection converts the contract direction to the domain one.
 func mapDirection(direction commonv1.Direction) (domain.Direction, error) {
 	switch direction {
 	case commonv1.Direction_DIRECTION_DEBIT:
@@ -366,7 +366,7 @@ func mapDirection(direction commonv1.Direction) (domain.Direction, error) {
 	}
 }
 
-// mapError переводит доменные ошибки в ошибки платформы с классом для gRPC-кода.
+// mapError converts domain errors to platform errors with a class for the gRPC code.
 func mapError(err error) error {
 	switch {
 	case errors.Is(err, domain.ErrIdempotencyReuse):

@@ -1,105 +1,109 @@
-# CBL-2.4. Резервы: Reserve, CommitReserve, ReleaseReserve
+# CBL-2.4. Reserves: Reserve, CommitReserve, ReleaseReserve
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E2, Ledger |
-| Репозиторий | `cbl-ledger` |
-| Размер | M |
-| Волна и параллельная группа | W1-LEDGER |
-| Зависит от | 2.1, CF-1 |
-| Версия контрактов | `cbl-protos@cf-1` (`billing/ledger/v1`, `billing/common/v1`) |
-| Статус | done, ревью закрыто |
+| Epic | E2, Ledger |
+| Repository | `cbl-ledger` |
+| Size | M |
+| Wave and parallel group | W1-LEDGER |
+| Depends on | 2.1, CF-1 |
+| Contract version | `cbl-protos@cf-1` (`billing/ledger/v1`, `billing/common/v1`) |
+| Status | done, review closed |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Резервы - денежный примитив саги выплат и возвратов (`CBL-000`, раздел 5: `requested ->
-reserved (Ledger) -> sent_to_gateway -> completed/failed`, при `failed` - компенсация) и
-задача 10.2. Резерв фиксирует средства мерчанта до подтверждения внешней операции, commit
-превращает резерв в проводку (деньги уходят), release возвращает средства при отмене.
+Reserves are the money primitive of the payout and refund saga (`CBL-000`, section 5: `requested ->
+reserved (Ledger) -> sent_to_gateway -> completed/failed`, with compensation on `failed`) and
+task 10.2. A reserve holds merchant funds until the external operation is confirmed; commit
+turns the reserve into a posting (the money leaves), release returns the funds on cancellation.
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: `Reserve`, `CommitReserve`, `ReleaseReserve` (gRPC, usecase, storage), таблицы
-`reserves` и `reserve_operations`, идемпотентность и конечный автомат резерва, e2e-сценарий
-compose (закрывает KI-ledger-03).
-Out of scope: запросы `GetBalance`/`ListEntries` (2.5), план счетов и провижининг счетов
-(2.6), публикация `ledger.events` (2.7, как и в 2.2), consumer `payment.events` (2.7).
+In scope: `Reserve`, `CommitReserve`, `ReleaseReserve` (gRPC, usecase, storage), the
+`reserves` and `reserve_operations` tables, reserve idempotency and the reserve finite state
+machine, the compose e2e scenario (closes KI-ledger-03).
+Out of scope: `GetBalance`/`ListEntries` requests (2.5), the chart of accounts and account
+provisioning (2.6), publication of `ledger.events` (2.7, same as in 2.2), the `payment.events`
+consumer (2.7).
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. Модель резерва (ADR-2.4): резерв - удержание (encumbrance) на балансовом счете
-мерчанта; `Reserve` переводит сумму из `available` в `reserved` того же счета и не создает
-проводок: удержание не является проводкой двойной записи. `ReleaseReserve` возвращает сумму
-из `reserved` в `available` (компенсация, проводок нет). `CommitReserve` захватывает
-удержание: `reserved` источника уменьшается, сумма уходит на счет выплат, и создается
-сбалансированная проводка в `transactions`/`entries` (дебет источника, кредит счета выплат).
+FR-1. Reserve model (ADR-2.4): a reserve is a hold (encumbrance) on a merchant balance
+account; `Reserve` moves the amount from `available` to `reserved` of the same account and
+creates no postings: a hold is not a double-entry posting. `ReleaseReserve` returns the amount
+from `reserved` to `available` (compensation, no postings). `CommitReserve` captures the
+hold: the source `reserved` decreases, the amount goes to the payout account, and a balanced
+posting is created in `transactions`/`entries` (debit of the source, credit of the payout
+account).
 
 FR-2. `Reserve(idempotency_key, account_id, amount, ref_id)`:
-- счет обязан существовать, быть типа `merchant` и иметь непустой `merchant_ref` (иначе
-  `reserve_not_allowed`): счет без ссылки на мерчанта не позволяет однозначно выбрать
-  получателя коммита, fail-closed против смешивания средств разных мерчантов;
-- актив и decimals обязаны совпадать со счетом (`asset_mismatch`);
-- сумма строго положительная (`invalid_reserve`), проверки переполнения `reserved`;
-- при `available < amount` - отказ `insufficient_funds` без изменений;
-- успех: статус `RESERVE_STATUS_ACTIVE`, `reserve_id` (UUIDv7); `ref_id` - бизнес-ссылка
-  (например, payout_id).
+- the account must exist, be of type `merchant` and have a non-empty `merchant_ref`
+  (otherwise `reserve_not_allowed`): an account without a merchant reference does not make it
+  possible to select the commit recipient unambiguously, fail-closed against mixing funds of
+  different merchants;
+- asset and decimals must match the account (`asset_mismatch`);
+- the amount is strictly positive (`invalid_reserve`), `reserved` overflow checks;
+- with `available < amount` - rejection `insufficient_funds` without changes;
+- success: status `RESERVE_STATUS_ACTIVE`, `reserve_id` (UUIDv7); `ref_id` is a business
+  reference (for example, payout_id).
 
 FR-3. `CommitReserve(idempotency_key, reserve_id)`:
-- резерв в статусе `active`: захват. В одной транзакции PostgreSQL: `reserved` источника
-  уменьшается на сумму удержания; счет выплат (`type=payout`, актив и `merchant_ref`
-  источника) создается идемпотентно при отсутствии, его `available` растет на сумму;
-  пишутся строка `transactions` (`ref_type='reserve'`, `ref_id` резерва, ключ и хэш
-  коммита) и пара `entries` (Dr источник `amount`, Cr счет выплат `amount`); резерв
-  получает `status=committed`, `transaction_id`, `counterparty_account_id`;
-- статус `committed` - идемпотентный повтор: возвращается `COMMITTED`, эффекта нет (в том
-  числе с другим ключом: состояние однозначно);
-- статус `released` - `reserve_invalid_state` (failed_precondition);
-- неизвестный `reserve_id` - `reserve_not_found` (not_found).
+- reserve in `active` status: capture. In a single PostgreSQL transaction: the source
+  `reserved` decreases by the hold amount; the payout account (`type=payout`, asset and
+  `merchant_ref` of the source) is created idempotently if absent, its `available` grows by
+  the amount; a `transactions` row is written (`ref_type='reserve'`, the reserve `ref_id`,
+  the commit key and hash) and a pair of `entries` (Dr source `amount`, Cr payout account
+  `amount`); the reserve receives `status=committed`, `transaction_id`,
+  `counterparty_account_id`;
+- `committed` status: idempotent replay, `COMMITTED` is returned, no effect (including with
+  a different key: the state is unambiguous);
+- `released` status: `reserve_invalid_state` (failed_precondition);
+- unknown `reserve_id`: `reserve_not_found` (not_found).
 
 FR-4. `ReleaseReserve(idempotency_key, reserve_id, reason)`:
-- резерв `active`: `reserved` уменьшается, `available` растет на сумму; статус `released`,
-  `reason` сохраняется; проводок нет;
-- статус `released` - идемпотентный повтор: возвращается `RELEASED` (reason повтора не
-  меняет результат и в хэш ключа не входит);
-- статус `committed` - `reserve_invalid_state`;
-- неизвестный `reserve_id` - `reserve_not_found`.
+- reserve `active`: `reserved` decreases, `available` grows by the amount; status
+  `released`, `reason` is stored; no postings;
+- `released` status: idempotent replay, `RELEASED` is returned (the replay reason does not
+  change the result and is not part of the key hash);
+- `committed` status: `reserve_invalid_state`;
+- unknown `reserve_id`: `reserve_not_found`.
 
-FR-5. Идемпотентность ключей: ключ `Reserve` уникален в `reserves`, ключи `CommitReserve` и
-`ReleaseReserve` - в `reserve_operations` (записываются и при повторе в терминальном
-статусе: ключ, использованный на одном резерве, отклоняет ту же операцию над другим
-резервом как `idempotency_key_reuse`); тело запроса фиксируется каноническим
-`request_hash` (Reserve: account/amount/ref; commit/release: reserve_id, для release reason
-исключен). Повтор ключа с тем же телом возвращает результат операции (`Replayed=true` в
-слое хранения, для повтора в терминальном статусе - текущий статус резерва); повтор с
-другим телом - `idempotency_key_reuse` (already_exists, 409); ключ коммита, уже занятый
-проводкой `PostTransaction` в `transactions`, также отклоняется как `idempotency_key_reuse`
-(без ретраев). Конкурентная вставка ключа (23505) повторяется согласно политике 2.3.
+FR-5. Key idempotency: the `Reserve` key is unique in `reserves`, the `CommitReserve` and
+`ReleaseReserve` keys are unique in `reserve_operations` (they are recorded also on a replay
+in a terminal status: a key used on one reserve rejects the same operation on another reserve
+as `idempotency_key_reuse`); the request body is fixed by the canonical `request_hash`
+(Reserve: account/amount/ref; commit/release: reserve_id, with reason excluded for release).
+A replay of the key with the same body returns the operation result (`Replayed=true` in the
+storage layer; for a replay in a terminal status, the current reserve status); a replay with
+a different body is `idempotency_key_reuse` (already_exists, 409); a commit key already taken
+by a `PostTransaction` posting in `transactions` is also rejected as `idempotency_key_reuse`
+(without retries). A concurrent key insert (23505) is retried according to the 2.3 policy.
 
-FR-6. Конкурентность: обновления `balances` только через CAS по `lock_version` с повторами
-`RetryPolicy` (2.3); при гонке двух коммитов одного резерва побеждает один (ровно одна
-проводка), проигравший после внутреннего повтора получает состояние `committed` из
-состояния резерва. Потерянные эффекты невозможны: финализация резерва выполняется
-условным UPDATE `WHERE status='active'` в той же транзакции, что балансы и проводки.
+FR-6. Concurrency: `balances` updates only via CAS on `lock_version` with `RetryPolicy`
+retries (2.3); when two commits of one reserve race, one wins (exactly one posting); the
+loser, after the internal retry, obtains the `committed` state from the reserve state. Lost
+effects are impossible: the reserve is finalized by a conditional UPDATE
+`WHERE status='active'` in the same transaction as the balances and postings.
 
-FR-7. Маппинг ошибок в gRPC: `insufficient_funds` и `reserve_invalid_state`
+FR-7. Error mapping to gRPC: `insufficient_funds` and `reserve_invalid_state`
 (failed_precondition), `reserve_not_allowed` (failed_precondition), `reserve_not_found`
 (not_found), `idempotency_key_reuse` (already_exists), `invalid_reserve`, `asset_mismatch`
 (invalid_argument), `account_not_found` (not_found), `conflict` (resource_exhausted),
-прочее - internal без деталей.
+everything else is internal without details.
 
-## 4. Контракты
+## 4. Contracts
 
-`LedgerService.Reserve/CommitReserve/ReleaseReserve` из `billing/ledger/v1` (CF-1):
-`ReserveRequest{idempotency_key, account_id, amount: Money, ref_id}` и
+`LedgerService.Reserve/CommitReserve/ReleaseReserve` from `billing/ledger/v1` (CF-1):
+`ReserveRequest{idempotency_key, account_id, amount: Money, ref_id}` and
 `CommitReserveRequest`/`ReleaseReserveRequest{idempotency_key, reserve_id[, reason]}` ->
-`{reserve_id, status}`; `ReserveStatus` enum: ACTIVE/COMMITTED/RELEASED. Лимиты входа
-транспорта: ключ и идентификаторы до 128 символов, reason до 200, amount в пределах int64.
-Принято с ограничением: в `CommitReserveRequest` нет поля счета-получателя, поэтому
-получателем коммита однозначно является счет выплат с тем же `merchant_ref` и активом
-(ADR-2.4); при появлении реального провайдера и уточнении контракта получатель выносится в
-запрос (CF-2 не затрагивает gRPC).
+`{reserve_id, status}`; the `ReserveStatus` enum: ACTIVE/COMMITTED/RELEASED. Transport input
+limits: key and identifiers up to 128 characters, reason up to 200, amount within int64.
+Accepted with a limitation: `CommitReserveRequest` has no recipient account field, so the
+commit recipient is unambiguously the payout account with the same `merchant_ref` and asset
+(ADR-2.4); when a real provider appears and the contract is clarified, the recipient is moved
+into the request (CF-2 does not affect gRPC).
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
 `migrations/00007_reserves.sql`:
 
@@ -134,85 +138,89 @@ CREATE TABLE reserve_operations (
 );
 ```
 
-GORM-модели `Reserve` и `ReserveOperation` повторяют DDL; `AutoMigrate` запрещен. Правка
-`CBL-000` (раздел 6): в перечень таблиц леджера добавляются `reserves` и
-`reserve_operations`. Статусы резерва экспортируются из `internal/domain`.
+The GORM models `Reserve` and `ReserveOperation` mirror the DDL; `AutoMigrate` is forbidden.
+Amendment to `CBL-000` (section 6): `reserves` and `reserve_operations` are added to the
+ledger table list. Reserve statuses are exported from `internal/domain`.
 
-## 6. Конечные автоматы
+## 6. Finite state machines
 
 ```
-(нет) --Reserve--> active --CommitReserve--> committed   (терминальный, есть проводка)
-                     |--ReleaseReserve-----> released    (терминальный, без проводки)
+(none) --Reserve--> active --CommitReserve--> committed   (terminal, has a posting)
+                      |--ReleaseReserve-----> released    (terminal, no posting)
 ```
 
-Переходы только из `active`; повтор операции в терминальном статусе идемпотентен (возврат
-текущего статуса), встречная операция отклоняется `reserve_invalid_state`.
+Transitions only from `active`; a replay of an operation in a terminal status is idempotent
+(the current status is returned), the opposite operation is rejected with
+`reserve_invalid_state`.
 
 ## 7. Edge cases
 
-Повтор `Reserve` тем же ключом (та же и другая сумма), конкурентные `Reserve` на один счет
-(не перерасходовать), `Commit` после `Release` и наоборот, двойной конкурентный `Commit`
-одним и другим ключом, повтор операции в терминальном статусе с новым ключом (ключ
-фиксируется, захват другого резерва тем же ключом отклоняется), `Commit`/`Release`
-неизвестного резерва, пустой `idempotency_key`, нулевая и отрицательная сумма, счет
-`clearing`/`fee`/`suspense`/`payout`, мерчантский счет без `merchant_ref`, чужой актив,
-несуществующий счет, переполнение `reserved` и `available`, коллизия ключа коммита с
-ключом `PostTransaction`, отключенный счет выплат создается на лету, счет выплат с другой
-шкалой decimals отклоняется, повтор `Release` с другим reason.
+`Reserve` replay with the same key (same and different amount), concurrent `Reserve` on one
+account (must not overspend), `Commit` after `Release` and vice versa, double concurrent
+`Commit` with the same and with different keys, a replay of an operation in a terminal status
+with a new key (the key is recorded, capturing another reserve with the same key is rejected),
+`Commit`/`Release` of an unknown reserve, an empty `idempotency_key`, a zero and a negative
+amount, accounts of type `clearing`/`fee`/`suspense`/`payout`, a merchant account without
+`merchant_ref`, a foreign asset, a nonexistent account, `reserved` and `available` overflow,
+a collision of the commit key with a `PostTransaction` key, a disabled payout account created
+on the fly, a payout account with a different decimals scale is rejected, `Release` replay
+with a different reason.
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-Дедлайн RPC - 1 с (CBL-003); горячие счета используют CAS без глобальных локов (T-LED-05),
-число повторов ограничено `RetryPolicy`; `SELECT ... FOR UPDATE` не используется. Покрытие
-unit+integration не ниже 80%; денежные сценарии только на реальном PostgreSQL
+The RPC deadline is 1 s (CBL-003); hot accounts use CAS without global locks (T-LED-05), the
+number of retries is bounded by `RetryPolicy`; `SELECT ... FOR UPDATE` is not used.
+Unit+integration coverage is at least 80%; money scenarios only on real PostgreSQL
 (testcontainers).
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
-| Smoke | `go build ./...`, compose-стенд: healthz, миграции до версии 7 |
-| Unit | `domain`: валидация суммы/ref, переходы статусов; transport: маппинг ошибок и статусов |
-| Integration (storage) | удержание и балансы; replay и reuse ключей; отклонения (сумма, тип счета, актив, нехватка); commit (проводка, счет выплат, идемпотентность, состояние); release (возврат, reason, состояние); конкурентные reserve и commit; переполнение |
-| Integration (gRPC, bufconn) | сквозной Reserve -> Commit -> Release через сервис с реальным PostgreSQL; коды ошибок |
-| E2E (compose) | сценарий: seed счетов, Reserve -> Commit (проверка проводки и балансов в PG) и Reserve -> Release; подписи compose-стенда |
-| Load | резервы не входят в профиль 2.9 (PostTransaction); при необходимости расширяется в 14.x |
+| Smoke | `go build ./...`, compose stand: healthz, migrations up to version 7 |
+| Unit | `domain`: amount/ref validation, status transitions; transport: error and status mapping |
+| Integration (storage) | hold and balances; key replay and reuse; rejections (amount, account type, asset, shortage); commit (posting, payout account, idempotency, state); release (return, reason, state); concurrent reserve and commit; overflow |
+| Integration (gRPC, bufconn) | end-to-end Reserve -> Commit -> Release through the service with real PostgreSQL; error codes |
+| E2E (compose) | scenario: seed accounts, Reserve -> Commit (verification of the posting and balances in PG) and Reserve -> Release; compose stand signatures |
+| Load | reserves are not part of profile 2.9 (PostTransaction); extended in 14.x if needed |
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-Коммит `CBL-2.4: резервы Reserve, CommitReserve, ReleaseReserve`; спека входит в коммит.
+Commit `CBL-2.4: reserves Reserve, CommitReserve, ReleaseReserve`; the spec is part of the
+commit.
 
-## 11. Открытые вопросы и решения
+## 11. Open questions and decisions
 
-- ADR-2.4: получатель коммита - счет выплат с тем же активом и `merchant_ref` (контракт
-  CF-1 не передает получателя); счет создается идемпотентно при первом коммите, при
-  несовпадении decimals с источником коммит отклоняется (`asset_mismatch`).
-- ADR: `Reserve` доступен только мерчантским счетам с непустым `merchant_ref` (fail-closed):
-  иначе средства разных мерчантов могли бы смешаться в общем счете выплат.
-- ADR: `ReleaseReserve` не создает сторно-проводок, так как удержание не является проводкой;
-  трасса операций - в `reserves`/`reserve_operations`; `CBL-000` (раздел 5) и `CBL-002`
-  (GE-3) синхронизированы формулировкой "release удержания без проводок"; Reconciler и
-  отчетность обязаны учитывать `reserves` (CBL-000, раздел 6).
-- ADR: ключ коммита пишется и в `transactions.idempotency_key`; занятый там ключ - конфликт
-  тела ключа (`idempotency_key_reuse`, 409), а не конкурентная гонка; ключи Reserve,
-  Commit и Release живут в разных пространствах и один ключ может встречаться в каждом
-  из них.
-- Открытый вопрос: события `reserve.created/committed/released` в `ledger.events` будут
-  публиковаться в 2.7 вместе с `transaction.posted` (outbox-запись для всех операций
-  леджера централизуется там); backfill уже проведенных операций не предусмотрен.
-  (Закрыт в 2.7: события пишутся в outbox в транзакции мутации.)
-- Открытый вопрос: провижининг счетов мерчанта (сейчас тесты создают SQL) - задача 2.6
-  (закрыт в 2.6: детерминированные счета и `EnsureAccount`).
+- ADR-2.4: the commit recipient is the payout account with the same asset and `merchant_ref`
+  (contract CF-1 does not pass the recipient); the account is created idempotently on the
+  first commit; if decimals do not match the source, the commit is rejected
+  (`asset_mismatch`).
+- ADR: `Reserve` is available only to merchant accounts with a non-empty `merchant_ref`
+  (fail-closed): otherwise funds of different merchants could be mixed in the shared payout
+  account.
+- ADR: `ReleaseReserve` creates no reversal postings, since a hold is not a posting; the
+  operation trace is in `reserves`/`reserve_operations`; `CBL-000` (section 5) and `CBL-002`
+  (GE-3) are synchronized with the wording "release of the hold without postings"; the
+  Reconciler and reporting must account for `reserves` (CBL-000, section 6).
+- ADR: the commit key is also written to `transactions.idempotency_key`; a key taken there is
+  a key body conflict (`idempotency_key_reuse`, 409), not a concurrent race; the Reserve,
+  Commit and Release keys live in different namespaces and one key may occur in each of them.
+- Open question: `reserve.created/committed/released` events in `ledger.events` will be
+  published in 2.7 together with `transaction.posted` (the outbox record for all ledger
+  operations is centralized there); backfill of already performed operations is not provided.
+  (Closed in 2.7: events are written to the outbox in the mutation transaction.)
+- Open question: provisioning of merchant accounts (currently tests create SQL) is task 2.6
+  (closed in 2.6: deterministic accounts and `EnsureAccount`).
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (14.10.2026). Блокеров нет; один major (согласование семантики
-release с системными спеками) и один major по идемпотентности (ключ повтора в терминальном
-статусе) закрыты, minor закрыты или зафиксированы.
+Four independent passes (14.10.2026). No blockers; one major (aligning the release semantics
+with the system specs) and one major on idempotency (the replay key in a terminal status) are
+closed, minors are closed or recorded.
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | коллизия ключа коммита с `transactions` дает 429 вместо 409; счет выплат без сверки decimals; `errReserveStateRace` в observer как unknown; пробелы тестов; `make smoke` без сборки | проверка `findTransaction` -> `idempotency_key_reuse`; сверка decimals получателя; cause `reserve_state_race`; добавлены тесты (типы счетов, unknown release, коллизия ключа, привязка ключа повтора, переполнение available, границы oversubscribe); в скрипт добавлен `go build ./...` |
-| Архитектуры | major: CBL-000/`CBL-002`/T-05 описывают компенсацию как сторно-проводку, ADR-2.4 - release без проводок; decimals получателя; ключ повтора не пишется в `reserve_operations` (кросс-резервный эффект) | системные спеки синхронизированы: CBL-000 (раздел 5 + примечание о `reserves`), CBL-002 (GE-3), глобальный AGENTS (T-05); сверка decimals; запись ключа в терминальном повторе (`recordReserveOperation`) + тест привязки |
-| С контекстом | major: тот же кросс-резервный эффект ключа повтора; дублирование retry-цикла и каркаса commit/release; `retryCause`; пробелы edge-тестов; шаг 7 не выполнен | запись ключа повтора; дублирование оставлено осознанно (T-LED-01, единая политика 2.3, вынос в generic-хелпер при пересмотре повторов в 14.4); cause добавлен; тесты добавлены; AGENTS/спека обновлены этим коммитом |
-| Безопасности | major: `merchant_ref IS NULL` уводит коммит на общий счет выплат (fail-open); утечка asset/decimals счета в текст gRPC-ошибки; ключ коммита: 8 холостых повторов и 429; decimals получателя; нет лимита длины `asset` | fail-closed в `Reserve` (непустой `merchant_ref`) + тест; причины ошибок `asset_mismatch`/`reserve_not_allowed`/`invalid_reserve` больше не включаются в ответ; проверка коллизии ключа до захвата локов; сверка decimals; лимит `asset` 32 |
+| No context | a commit key collision with `transactions` gives 429 instead of 409; the payout account without a decimals reconciliation; `errReserveStateRace` in the observer as unknown; test gaps; `make smoke` without a build | the `findTransaction` check -> `idempotency_key_reuse`; recipient decimals reconciliation; cause `reserve_state_race`; tests added (account types, unknown release, key collision, replay key binding, available overflow, oversubscribe boundaries); `go build ./...` added to the script |
+| Architecture | major: CBL-000/`CBL-002`/T-05 describe compensation as a reversal posting, while ADR-2.4 has release without postings; recipient decimals; the replay key is not written to `reserve_operations` (a cross-reserve effect) | system specs synchronized: CBL-000 (section 5 + the note about `reserves`), CBL-002 (GE-3), the global AGENTS (T-05); decimals reconciliation; the key is recorded on a terminal replay (`recordReserveOperation`) + a binding test |
+| With context | major: the same cross-reserve replay key effect; duplication of the retry loop and the commit/release skeleton; `retryCause`; edge test gaps; step 7 not done | replay key recording; the duplication is left deliberately (T-LED-01, single policy 2.3, extraction into a generic helper when retries are revisited in 14.4); the cause is added; tests added; AGENTS/spec updated by this commit |
+| Security | major: `merchant_ref IS NULL` routes the commit to the shared payout account (fail-open); leakage of the account asset/decimals into the gRPC error text; the commit key: 8 idle retries and 429; recipient decimals; no length limit for `asset` | fail-closed in `Reserve` (a non-empty `merchant_ref`) + a test; the error causes `asset_mismatch`/`reserve_not_allowed`/`invalid_reserve` are no longer included in the response; the key collision is checked before locks are acquired; decimals reconciliation; `asset` limit 32 |

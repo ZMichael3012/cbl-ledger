@@ -1,25 +1,25 @@
-// Пакет domain содержит доменные модели, инварианты и правила сервиса ledger,
-// не зависящие от транспорта и хранилищ.
+// Package domain contains domain models, invariants and rules of the ledger service
+// that do not depend on transport or storage.
 package domain
 
-// AccountType описывает назначение счета в плане счетов леджера.
+// AccountType describes the purpose of an account in the ledger account plan.
 type AccountType string
 
-// Типы счетов плана счетов.
+// Account plan types.
 const (
-	// AccountTypeMerchant описывает балансовый счет мерчанта.
+	// AccountTypeMerchant describes a merchant balance account.
 	AccountTypeMerchant AccountType = "merchant"
-	// AccountTypeClearing описывает транзитный счет приема платежей.
+	// AccountTypeClearing describes a transit account for incoming payments.
 	AccountTypeClearing AccountType = "clearing"
-	// AccountTypeFee описывает счет комиссий платформы.
+	// AccountTypeFee describes a platform fee account.
 	AccountTypeFee AccountType = "fee"
-	// AccountTypePayout описывает счет выплат.
+	// AccountTypePayout describes a payout account.
 	AccountTypePayout AccountType = "payout"
-	// AccountTypeSuspense описывает счет невыясненных расхождений.
+	// AccountTypeSuspense describes a suspense account for unresolved discrepancies.
 	AccountTypeSuspense AccountType = "suspense"
 )
 
-// Valid сообщает, что тип счета входит в план счетов.
+// Valid reports whether the account type belongs to the account plan.
 func (t AccountType) Valid() bool {
 	switch t {
 	case AccountTypeMerchant, AccountTypeClearing, AccountTypeFee, AccountTypePayout, AccountTypeSuspense:
@@ -29,18 +29,18 @@ func (t AccountType) Valid() bool {
 	}
 }
 
-// Direction описывает направление проводки в двойной записи.
+// Direction describes the direction of an entry in double-entry bookkeeping.
 type Direction string
 
-// Направления проводок.
+// Entry directions.
 const (
-	// DirectionDebit уменьшает баланс счета.
+	// DirectionDebit decreases the account balance.
 	DirectionDebit Direction = "debit"
-	// DirectionCredit увеличивает баланс счета.
+	// DirectionCredit increases the account balance.
 	DirectionCredit Direction = "credit"
 )
 
-// Valid сообщает, что направление корректно.
+// Valid reports whether the direction is valid.
 func (d Direction) Valid() bool {
 	return d == DirectionDebit || d == DirectionCredit
 }

@@ -1,9 +1,9 @@
 -- +goose Up
--- Второй барьер денежного инварианта (T-LED-02): на коммите транзакции сумма дебетов
--- обязана совпадать с суммой кредитов, а проводок должно быть не менее двух.
--- CONSTRAINT TRIGGER отложен до коммита: проводки вставляются по одной, и промежуточное
--- состояние транзакции несбалансированно. Барьер срабатывает и при прямой вставке в обход
--- приложения.
+-- The second barrier of the money invariant (T-LED-02): at transaction commit the debit sum
+-- must match the credit sum, and there must be at least two entries.
+-- The CONSTRAINT TRIGGER is deferred until commit: entries are inserted one by one, and the
+-- intermediate transaction state is unbalanced. The barrier also fires on a direct insert
+-- bypassing the application.
 -- +goose StatementBegin
 CREATE FUNCTION entries_transaction_balanced() RETURNS trigger AS $$
 DECLARE
@@ -28,7 +28,7 @@ END;
 $$ LANGUAGE plpgsql;
 -- +goose StatementEnd
 
--- Фиксация search_path исключает подмену таблицы враждебной схемой из пути поиска.
+-- Pinning search_path excludes table substitution by a hostile schema from the search path.
 ALTER FUNCTION entries_transaction_balanced() SET search_path = pg_catalog, pg_temp;
 
 CREATE CONSTRAINT TRIGGER entries_transaction_balanced_trigger

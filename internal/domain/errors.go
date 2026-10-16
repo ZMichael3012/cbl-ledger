@@ -2,40 +2,40 @@ package domain
 
 import "errors"
 
-// Ошибки домена леджера; транспорт маппит их в gRPC-статусы.
+// Ledger domain errors; the transport maps them to gRPC statuses.
 var (
-	// ErrInvalidTransaction сообщает о некорректной транзакции в целом.
+	// ErrInvalidTransaction reports an invalid transaction as a whole.
 	ErrInvalidTransaction = errors.New("ledger: invalid transaction")
-	// ErrInvalidEntry сообщает о некорректной проводке.
+	// ErrInvalidEntry reports an invalid entry.
 	ErrInvalidEntry = errors.New("ledger: invalid entry")
-	// ErrUnbalanced сообщает о несбалансированной транзакции.
+	// ErrUnbalanced reports an unbalanced transaction.
 	ErrUnbalanced = errors.New("ledger: debits and credits are not balanced")
-	// ErrUnknownAccount сообщает о несуществующем счете.
+	// ErrUnknownAccount reports a nonexistent account.
 	ErrUnknownAccount = errors.New("ledger: unknown account")
-	// ErrAssetMismatch сообщает о разных активах или decimals в одной транзакции.
+	// ErrAssetMismatch reports different assets or decimals within one transaction.
 	ErrAssetMismatch = errors.New("ledger: account asset mismatch")
-	// ErrInsufficientFunds сообщает о недостатке средств на счете.
+	// ErrInsufficientFunds reports insufficient funds on the account.
 	ErrInsufficientFunds = errors.New("ledger: insufficient funds")
-	// ErrConflict сообщает об исчерпании попыток оптимистичной блокировки.
+	// ErrConflict reports exhausted optimistic lock attempts.
 	ErrConflict = errors.New("ledger: concurrent update conflict")
-	// ErrIdempotencyReuse сообщает о повторе ключа идемпотентности с другим телом.
+	// ErrIdempotencyReuse reports a repeated idempotency key with a different payload.
 	ErrIdempotencyReuse = errors.New("ledger: idempotency key reuse with different payload")
-	// ErrInvalidReserve сообщает о некорректном запросе резерва.
+	// ErrInvalidReserve reports an invalid reserve request.
 	ErrInvalidReserve = errors.New("ledger: invalid reserve request")
-	// ErrUnknownReserve сообщает о несуществующем резерве.
+	// ErrUnknownReserve reports a nonexistent reserve.
 	ErrUnknownReserve = errors.New("ledger: unknown reserve")
-	// ErrReserveState сообщает о недопустимом переходе состояния резерва.
+	// ErrReserveState reports an invalid reserve state transition.
 	ErrReserveState = errors.New("ledger: reserve in invalid state")
-	// ErrReserveNotAllowed сообщает, что тип счета не поддерживает резервирование.
+	// ErrReserveNotAllowed reports that the account type does not support reservation.
 	ErrReserveNotAllowed = errors.New("ledger: reserve is not allowed for account")
-	// ErrInvalidCursor сообщает о некорректном курсоре выписки.
+	// ErrInvalidCursor reports an invalid statement cursor.
 	ErrInvalidCursor = errors.New("ledger: invalid cursor")
-	// ErrInvalidAccountPlan сообщает о нарушении правил плана счетов.
+	// ErrInvalidAccountPlan reports a violation of the account plan rules.
 	ErrInvalidAccountPlan = errors.New("ledger: invalid account plan key")
-	// ErrAccountConflict сообщает о существующем счете с другими характеристиками.
+	// ErrAccountConflict reports an existing account with different characteristics.
 	ErrAccountConflict = errors.New("ledger: account already exists with different parameters")
-	// ErrInvalidQuery сообщает о некорректных параметрах выписки или списка счетов.
+	// ErrInvalidQuery reports invalid statement or account list parameters.
 	ErrInvalidQuery = errors.New("ledger: invalid query")
-	// ErrTooManyResults сообщает о превышении серверного предела выдачи.
+	// ErrTooManyResults reports exceeding the server result limit.
 	ErrTooManyResults = errors.New("ledger: too many results")
 )

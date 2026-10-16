@@ -1,4 +1,4 @@
-// main запускает HTTP- и gRPC-сервис ledger платформы CBL.
+// main starts the HTTP and gRPC service of the CBL ledger platform.
 package main
 
 import (
@@ -38,8 +38,8 @@ import (
 	"github.com/cbl/cbl-ledger/internal/usecase"
 )
 
-// main поднимает gRPC-сервер LedgerService, административный HTTP-сервер,
-// применяет миграции и завершает работу по SIGINT/SIGTERM.
+// main starts the LedgerService gRPC server and the administrative HTTP server,
+// applies migrations and shuts down on SIGINT/SIGTERM.
 func main() {
 	log, err := zap.NewProduction()
 	if err != nil {
@@ -58,9 +58,9 @@ func main() {
 		return
 	}
 
-	// Пул ограничен: без потолка всплеск нагрузки исчерпывает max_connections PostgreSQL
-	// (обнаружено нагрузочным тестом 2.9: ошибки under load при 500 rps).
-	// Потолок конфигурации ограничен сверху, чтобы опечатка в env не исчерпала БД.
+	// The pool is bounded: without a cap a load spike exhausts PostgreSQL max_connections
+	// (found by the 2.9 load test: errors under load at 500 rps).
+	// The configuration cap is bounded from above so that an env typo cannot exhaust the DB.
 	sqlDB, err := db.DB()
 	if err != nil {
 		log.Error("resolve sql db failed", zap.Error(err))
@@ -203,7 +203,7 @@ func main() {
 	log.Info("shutdown finished")
 }
 
-// metricsHandler отдает заглушку метрик до задачи 0.7.
+// metricsHandler serves a metrics stub until task 0.7.
 func metricsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -213,7 +213,7 @@ func metricsHandler() http.Handler {
 	return mux
 }
 
-// getenv возвращает значение переменной окружения или значение по умолчанию.
+// getenv returns the environment variable value or the default value.
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -221,7 +221,7 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-// getenvInt возвращает положительное целое из переменной окружения или значение по умолчанию.
+// getenvInt returns a positive integer from the environment variable or the default value.
 func getenvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -231,8 +231,8 @@ func getenvInt(key string, fallback int) int {
 	return fallback
 }
 
-// splitCSV разбирает список значений из переменной окружения через запятую,
-// отбрасывая пустые элементы и пробелы вокруг них.
+// splitCSV parses a comma-separated list of values from an environment variable,
+// dropping empty elements and surrounding whitespace.
 func splitCSV(raw string) []string {
 	parts := strings.Split(raw, ",")
 	values := make([]string, 0, len(parts))

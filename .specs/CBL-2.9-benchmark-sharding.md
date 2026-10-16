@@ -1,227 +1,234 @@
-# CBL-2.9. Бенчмарк записи и стратегия шардирования по account_id
+# CBL-2.9. Write benchmark and sharding strategy by account_id
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E2, Ledger |
-| Репозиторий | `cbl-ledger` |
-| Размер | M |
-| Волна и параллельная группа | W1-LEDGER |
-| Зависит от | 2.3 |
-| Версия контрактов | `cbl-protos@cf-1` (`billing/ledger/v1`) |
-| Статус | done (ревью закрыто, коммит CBL-2.9) |
+| Epic | E2, Ledger |
+| Repository | `cbl-ledger` |
+| Size | M |
+| Wave and parallel group | W1-LEDGER |
+| Depends on | 2.3 |
+| Contract version | `cbl-protos@cf-1` (`billing/ledger/v1`) |
+| Status | done (review closed, commit CBL-2.9) |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Задача запускается рано (CBL-004, принцип 5), так как ее результат может изменить архитектуру
-леджера: целевой профиль из `CBL-002` - 500 TPS записи и чтения, p99 `PostTransaction` менее
-500 мс без ошибок баланса. Горячие счета (T-06) и риск деградации TPS - главный риск эпика E2.
-Цель: измерить фактическую пропускную способность механизма 2.2/2.3 на реальном PostgreSQL,
-проверить достижимость цели и зафиксировать стратегию шардирования по `account_id`
-(реализация или обоснованное отложение с критериями пересмотра).
+The task starts early (CBL-004, principle 5), since its result may change the ledger
+architecture: the target profile from `CBL-002` is 500 TPS of writes and reads, p99 of
+`PostTransaction` under 500 ms without balance errors. Hot accounts (T-06) and the risk of
+TPS degradation are the main risk of epic E2.
+Goal: measure the actual throughput of the 2.2/2.3 mechanism on real PostgreSQL,
+verify that the target is achievable and fix the sharding strategy by `account_id`
+(implementation or a justified deferral with revision criteria).
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: Go-бенчмарки горячего и распределенного профиля на testcontainers PostgreSQL;
-k6-сценарий gRPC `PostTransaction` для compose-стенда (`test/load/`) с сидом счетов; отчет
-о пропускной способности и узких местах; ADR по шардированию и обновление trade-offs AGENTS.md.
+In scope: Go benchmarks of the hot and distributed profile on testcontainers PostgreSQL;
+the k6 gRPC `PostTransaction` scenario for the compose stand (`test/load/`) with an account
+seed; a throughput and bottleneck report; an ADR on sharding and an update of the
+AGENTS.md trade-offs.
 
-Out of scope: реализация шардирования/батчинга (только по результатам и при необходимости -
-отдельной задачей 14.2/14.3); глобальный профиль 3000 RPS (14.2); chaos-тесты (14.3);
-резервы (2.4), consumer (2.7).
+Out of scope: implementation of sharding/batching (only based on the results and, if needed,
+in a separate task 14.2/14.3); the global 3000 RPS profile (14.2); chaos tests (14.3);
+reserves (2.4), the consumer (2.7).
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. Go-бенчмарки (build tag integration, реальный PostgreSQL):
-- `BenchmarkPostTransactionHotAccount` (последовательный, 2.3) - базовая линия;
-- `BenchmarkPostTransactionHotAccountParallel` - параллельный профиль через `RunParallel`,
-  уникальные ключи идемпотентности, метрики `retries_per_op` (событий повторов на операцию)
-  и `conflicts_%` (доля операций, исчерпавших бюджет повторов) из observer 2.3;
-- `BenchmarkPostTransactionDistributedAccounts` - параллельный профиль по 64 парам счетов
-  без общего горячего счета: потолок слоя storage и PostgreSQL без contention (транспорт
-  gRPC измеряется k6);
-- `BenchmarkPostTransactionManyEntries` и `...NoTrigger` - A/B стоимости deferred-триггера
-  00006 на транзакции из 100 входов (лимит 2.2).
+FR-1. Go benchmarks (build tag integration, real PostgreSQL):
+- `BenchmarkPostTransactionHotAccount` (sequential, 2.3) - the baseline;
+- `BenchmarkPostTransactionHotAccountParallel` - the parallel profile via `RunParallel`,
+  unique idempotency keys, the metrics `retries_per_op` (retry events per operation)
+  and `conflicts_%` (share of operations that exhausted the retry budget) from the 2.3 observer;
+- `BenchmarkPostTransactionDistributedAccounts` - the parallel profile over 64 account pairs
+  without a shared hot account: the ceiling of the storage layer and PostgreSQL without
+  contention (the gRPC transport is measured by k6);
+- `BenchmarkPostTransactionManyEntries` and `...NoTrigger` - an A/B of the cost of the
+  deferred trigger 00006 on a transaction with 100 entries (the 2.2 limit).
 
-FR-2. k6-сценарий `test/load/post_transaction.js`:
-- gRPC-вызов `billing.ledger.v1.LedgerService/PostTransaction` по прото из `cbl-protos`;
-- режимы через env: `RATE` (arrival rate, по умолчанию 100), `DURATION` (30s), `PAIRS`
-  (число пар счетов merchant debit/credit из `test/load/seed.sql`, по умолчанию 64,
-  максимум 256);
-- исключения транспорта фиксируются отдельной метрикой `transport_failures` (check не
-  выполняется при брошенном invoke), пороги: `p(99) < 500ms`, `checks rate > 0.999`,
-  `transport_failures rate < 0.001`, `dropped_iterations count < 500` (критерий CBL-002);
-- запуск без установки k6: образ `grafana/k6:2.3.0` (пин), прото монтируется из
-  `services/cbl-protos`; команды в шапке сценария (cmd.exe).
+FR-2. The k6 scenario `test/load/post_transaction.js`:
+- the gRPC call `billing.ledger.v1.LedgerService/PostTransaction` using the proto from `cbl-protos`;
+- modes via env: `RATE` (arrival rate, 100 by default), `DURATION` (30s), `PAIRS`
+  (the number of merchant debit/credit account pairs from `test/load/seed.sql`, 64 by default,
+  256 maximum);
+- transport exceptions are recorded by the separate metric `transport_failures` (the check is
+  not executed when the invoke is thrown), thresholds: `p(99) < 500ms`, `checks rate > 0.999`,
+  `transport_failures rate < 0.001`, `dropped_iterations count < 500` (the CBL-002 criterion);
+- running without installing k6: the `grafana/k6:2.3.0` image (pinned), the proto is mounted
+  from `services/cbl-protos`; the commands are in the header of the scenario (cmd.exe).
 
-FR-3. Отчет о пропускной способности: таблица измерений (профиль, конкурентность, TPS,
-p99/среднее, доля повторов) и анализ узких мест: число круговых обращений на проводку,
-сериализация горячей строки баланса, стоимость deferred-триггера 00006, ограничения
-одного инстанса PostgreSQL.
+FR-3. Throughput report: a measurement table (profile, concurrency, TPS,
+p99/average, retry share) and a bottleneck analysis: the number of round trips per posting,
+serialization of the hot balance row, the cost of the deferred trigger 00006, the limits of a
+single PostgreSQL instance.
 
-FR-4. Стратегия шардирования: ADR с вариантами (оставить как есть; батчинг дельт по
-короткому окну; шардированные субсчета клиринга с агрегацией; партиционирование `entries`
-по времени), критериями выбора и порогами пересмотра на 14.2/14.3. Решение фиксируется
-в AGENTS.md (T-LED-01, T-LED-02) и спецификации.
+FR-4. Sharding strategy: an ADR with options (keep as is; batching of deltas over a short
+window; sharded clearing sub-accounts with aggregation; time partitioning of `entries`),
+selection criteria and revision thresholds at 14.2/14.3. The decision is fixed
+in AGENTS.md (T-LED-01, T-LED-02) and the specification.
 
-FR-5. Критерий приемки: подтвержденная на локальном стенде пропускная способность записи
-не ниже 500 TPS (распределенный профиль) при p99 менее 500 мс; для горячего одиночного
-счета фиксируется измеренный предел и план защиты (батчинг/шардирование при превышении).
-Приемка 2.9 покрывает только запись: чтения `GetBalance`/`ListEntries` появятся в 2.5,
-смешанный профиль и пороги чтения - вход задачи 14.1.
+FR-5. Acceptance criterion: the write throughput confirmed on the local stand is
+at least 500 TPS (distributed profile) with p99 under 500 ms; for a hot single
+account the measured limit and the protection plan (batching/sharding on breach) are
+recorded. Acceptance of 2.9 covers writes only: `GetBalance`/`ListEntries` reads appear in 2.5,
+the mixed profile and read thresholds are input of task 14.1.
 
-FR-6. По результатам нагрузочного прогона исправлены выявленные узкие места конфигурации:
-пул соединений PostgreSQL сервиса ограничен (`DB_MAX_OPEN_CONNS=20`, `DB_MAX_IDLE_CONNS=10`,
-lifetime 30m, потолок конфигурации 100); без потолка всплеск 500 rps исчерпывал
-`max_connections` PostgreSQL (ошибки `Internal` в 2.57% вызовов). После фикса - 0 ошибок
-среди выполненных вызовов на 500 и 1000 rps (на 1000 rps около 1% итераций отброшено
-очередью k6 при насыщении хвоста, доля успешных среди выполненных 100%).
+FR-6. Based on the load run results, the identified configuration bottlenecks were fixed:
+the service PostgreSQL connection pool is limited (`DB_MAX_OPEN_CONNS=20`, `DB_MAX_IDLE_CONNS=10`,
+lifetime 30m, configuration ceiling 100); without the ceiling a burst of 500 rps exhausted
+the PostgreSQL `max_connections` (`Internal` errors in 2.57% of calls). After the fix - 0 errors
+among executed calls at 500 and 1000 rps (at 1000 rps about 1% of iterations were dropped by the
+k6 queue upon tail saturation, the share of successful ones among executed 100%).
 
-## 3.1. Результаты замеров
+## 3.1. Measurement results
 
-Стенд: Windows 10, Intel Core i7-9750H (6 ядер / 12 потоков), Docker Desktop (WSL2),
-PostgreSQL 16 в контейнере; Go-бенчмарки через testcontainers, k6 через compose-стенд
-(ledger + PostgreSQL + Kafka в одном compose), k6 `grafana/k6` v2.3.0 в контейнере.
+Stand: Windows 10, Intel Core i7-9750H (6 cores / 12 threads), Docker Desktop (WSL2),
+PostgreSQL 16 in a container; Go benchmarks via testcontainers, k6 via the compose stand
+(ledger + PostgreSQL + Kafka in one compose), k6 `grafana/k6` v2.3.0 in a container.
 
-| Профиль | Конкурентность | Достигнуто | Латентность | Ошибки/повторы |
+| Profile | Concurrency | Achieved | Latency | Errors/retries |
 | :-- | :-- | :-- | :-- | :-- |
-| Go bench: горячая пара, последовательно | 1 | 283 записи/с | 3.53 мс/оп | нет |
-| Go bench: горячая пара, параллельно | 24 | 168 записей/с суммарно (успешных ~145/с) | 5.95 мс/оп (агрегатное время) | 3.07 события повторов/оп; 13.9% операций исчерпали повторы |
-| Go bench: 64 пары, параллельно | 24 | 2070 записей/с | 0.48 мс/оп (агрегатное время) | нет |
-| Go bench: один UPDATE строки (потолок блокировки) | 24 | 7374 обновления/с | 0.14 мс/оп (агрегатное время) | нет |
-| Go bench: 100 входов, триггер 00006 включен | 1 | ~9 транзакций/с | 111.5 мс/оп | нет |
-| Go bench: 100 входов, триггер 00006 выключен | 1 | ~10 транзакций/с | 100.6 мс/оп | нет |
-| k6 end-to-end, целевые 500 rps | 5 - 7 VU | 10000 итераций за 20 с (ровно по ставке, без отбросов) | p95 15.4 мс, p99 24.2 мс | 0 |
-| k6 end-to-end, целевые 1000 rps | до 178 VU | 19809 итераций за 20 с, отброшено 192 (0.97%) | p95 193 мс, p99 369 мс | 0 среди выполненных |
+| Go bench: hot pair, sequential | 1 | 283 writes/s | 3.53 ms/op | none |
+| Go bench: hot pair, parallel | 24 | 168 writes/s total (successful ~145/s) | 5.95 ms/op (aggregate time) | 3.07 retry events/op; 13.9% of operations exhausted retries |
+| Go bench: 64 pairs, parallel | 24 | 2070 writes/s | 0.48 ms/op (aggregate time) | none |
+| Go bench: single row UPDATE (lock ceiling) | 24 | 7374 updates/s | 0.14 ms/op (aggregate time) | none |
+| Go bench: 100 entries, trigger 00006 enabled | 1 | ~9 transactions/s | 111.5 ms/op | none |
+| Go bench: 100 entries, trigger 00006 disabled | 1 | ~10 transactions/s | 100.6 ms/op | none |
+| k6 end-to-end, target 500 rps | 5 - 7 VU | 10000 iterations in 20 s (exactly at the rate, no drops) | p95 15.4 ms, p99 24.2 ms | 0 |
+| k6 end-to-end, target 1000 rps | up to 178 VU | 19809 iterations in 20 s, 192 dropped (0.97%) | p95 193 ms, p99 369 ms | 0 among executed |
 
-Выводы:
-1. Цель 500 TPS записи при p99 менее 500 мс достигнута. Запас по пропускной способности
-   слоя storage ~4x (2070 записей/с против 500); запас e2e по p99 скромнее: 24 мс при
-   500 rps, 369 мс при 1000 rps (1.35x до порога 500 мс) - основная деградация на пике
-   идет от очереди (пул соединений и повторы), а не от транзакционной модели в целом.
-2. Число круговых обращений на проводку (около 9 операторов: поиск ключа, вставка
-   транзакции и проводок, выборка счетов и балансов, обновления; оценка по коду, изоляция
-   в 14.2 при необходимости) определяет базовую латентность 3.5 мс; потолок сериализации
-   одной строки много выше (7374 update/с), то есть строка баланса не является пределом.
-3. Одиночный горячий счет деградирует при конкуренции: последовательный предел 283/с,
-   при 24 писателях суммарная пропускная способность падает до 168/с из-за шторма
-   конфликтов CAS (3.07 события повторов на операцию и 13.9% отказов). Предел создает
-   не блокировка строки, а модель оптимистичных повторов при высокой конкуренции.
-4. Стоимость deferred-триггера 00006 измерена A/B: на транзакции из 100 входов +10.9 мс
-   (111.5 против 100.6 мс, около 11% операции); на типовых проводках из 2 - 4 входов
-   вклад в пределах шума (два агрегата по индексу). Открытый вопрос 2.3 о многоentry
-   стоимости закрыт; при необходимости изоляции в 14.2 - pg_stat_statements.
-5. Нагрузочный прогон выявил и позволил закрыть дефект конфигурации: неограниченный пул
-   соединений исчерпывал PostgreSQL под нагрузкой (FR-6).
+Conclusions:
+1. The target of 500 TPS of writes with p99 under 500 ms is reached. The throughput margin of
+   the storage layer is ~4x (2070 writes/s against 500); the e2e margin by p99 is more modest:
+   24 ms at 500 rps, 369 ms at 1000 rps (1.35x to the 500 ms threshold) - the main degradation
+   at peak comes from queuing (the connection pool and retries), not from the transactional
+   model as a whole.
+2. The number of round trips per posting (about 9 statements: key lookup, transaction and
+   entry inserts, account and balance selects, updates; estimated from the code, isolation
+   in 14.2 if needed) determines the baseline latency of 3.5 ms; the serialization ceiling
+   of a single row is much higher (7374 updates/s), that is, the balance row is not the limit.
+3. A single hot account degrades under contention: the sequential limit is 283/s,
+   with 24 writers the total throughput drops to 168/s because of the CAS conflict
+   storm (3.07 retry events per operation and 13.9% failures). The limit is created
+   not by row locking but by the optimistic retry model under high contention.
+4. The cost of the deferred trigger 00006 was measured in an A/B: on a transaction with 100
+   entries +10.9 ms (111.5 vs 100.6 ms, about 11% of the operation); on typical postings with
+   2 - 4 entries the contribution is within noise (two index aggregates). The 2.3 open question
+   about the many-entry cost is closed; if isolation is needed in 14.2 - pg_stat_statements.
+5. The load run identified and allowed closing a configuration defect: the unlimited connection
+   pool exhausted PostgreSQL under load (FR-6).
 
-## 3.2. Стратегия шардирования (ADR-2.9)
+## 3.2. Sharding strategy (ADR-2.9)
 
-Решение: текущая модель (оптимистичный CAS + политика повторов 2.3) сохраняется; реализация
-шардирования и батчинга в W1 не вводится. Обоснование: цель 500 TPS достигается, пока
-операции распределены по счетам; единый горячий счет структурно возникает у клирингового
-счета (каждый завершенный платеж проводит Dr clearing / Cr merchant), а платежный поток
-достигает проектной доли только к волне W3 - тогда и требуется защита.
+Decision: the current model (optimistic CAS + the 2.3 retry policy) is kept; no
+sharding or batching implementation is introduced in W1. Rationale: the 500 TPS target is
+reached as long as operations are distributed across accounts; a single hot account
+structurally arises at the clearing account (every completed payment posts
+Dr clearing / Cr merchant), and the payment flow reaches its design share only by wave
+W3 - that is when protection is needed.
 
-Порог пересмотра: 200 записей/с в один счет - около 70% от последовательного предела
-283/с, запас на всплески; первичным триггером также являются p99 операций с этим счетом
-выше 500 мс и доля ошибок выше 0.1%. При срабатывании применяется по порядку:
+Revision threshold: 200 writes/s to a single account - about 70% of the sequential limit
+of 283/s, with margin for bursts; the primary triggers are also p99 of operations with this
+account above 500 ms and an error share above 0.1%. On trigger, the following is applied
+in order:
 
-1. Сокращение числа операторов проводки (единые выборки, пакетные вставки): ожидаемый
-   эффект 2 - 3x к последовательному пределу; диагностика - 14.2, реализация - 14.6.
-2. Батчевый коммиттер горячего счета: накопление дельт в окне 5 - 10 мс и одна транзакция
-   на пакет; применимо к внутренним потокам (клиринг), не меняет мерчант API; 14.6.
-3. Шардирование счета по `account_id`: N субсчетов (clearing#0..N-1) с выбором по хешу
-   бизнес-ключа, периодическая консолидация и агрегированный баланс для отчетности;
-   двойная запись сохраняется на уровне субсчетов. Расчет: 8 субсчетов при конкурентном
-   пределе 168/с дают около 1340/с, при последовательном 283/с - около 2260/с (выше
-   целевого клирингового потока платформы); 14.6.
-4. Партиционирование `entries` по времени: после подтвержденного роста (оценка роста
-   и порог - 14.2), перекликается с открытым вопросом 2.1.
+1. Reduction of the number of posting statements (single selects, batch inserts): expected
+   effect 2 - 3x to the sequential limit; diagnostics - 14.2, implementation - 14.6.
+2. Batch committer for the hot account: accumulation of deltas over a window of 5 - 10 ms
+   and one transaction per batch; applicable to internal flows (clearing), does not change
+   the merchant API; 14.6.
+3. Account sharding by `account_id`: N sub-accounts (clearing#0..N-1) selected by a hash of
+   the business key, periodic consolidation and an aggregated balance for reporting;
+   double entry is preserved at the sub-account level. Estimate: 8 sub-accounts at the
+   concurrent limit of 168/s give about 1340/s, at the sequential 283/s - about 2260/s
+   (above the platform target clearing flow); 14.6.
+4. Time partitioning of `entries`: after confirmed growth (the growth estimate
+   and threshold - 14.2), interlinks with open question 2.1.
 
-Отвергнутая альтернатива: сериализация горячего счета пессимистичной блокировкой строки до
-коммита. Транзакция держит лок около своей длительности (3.5 мс на текущей раскладке), что
-дает не выше последовательного предела (~283/с) и очереди при пиках; выигрыш возможен
-только вместе с батчингом (вариант 2), где эквивалентен ему. CAS сохраняется для
-негорячих счетов, где конфликтов почти нет (замер distributed).
+Rejected alternative: serialization of the hot account with a pessimistic row lock until
+commit. The transaction holds the lock for about its duration (3.5 ms at the current layout),
+which gives no more than the sequential limit (~283/s) and queues at peaks; the gain is
+possible only together with batching (option 2), where it is equivalent to it. CAS is kept
+for non-hot accounts, where there are almost no conflicts (the distributed measurement).
 
-Владелец реализации: диагностика профиля - 14.2, реализация мер 1 - 3 при превышении
-порога - новая задача 14.6 (E14, зависит от 14.2). Мониторинг порога: метрика повторов
-(observer 2.3) и скорость проводок по счету, алерты - 14.4; при нагрузке warn-логи
-повторов сэмплируются конфигурацией zap production (100 записей/с на уровень).
+Implementation owner: profile diagnostics - 14.2, implementation of measures 1 - 3 on
+threshold breach - the new task 14.6 (E14, depends on 14.2). Threshold monitoring: the
+retry metric (2.3 observer) and the posting rate per account, alerts - 14.4; under load
+the retry warn logs are sampled by the zap production configuration (100 entries/s
+per level).
 
-## 4. Контракты
+## 4. Contracts
 
-- gRPC: `LedgerService/PostTransaction` (`cbl-protos@cf-1`), без изменений.
-- Kafka: без изменений.
-- Хранилище: без изменений схемы; сид `test/load/seed.sql` создает до 256 пар счетов
-  с детерминированными UUID и начальными балансами.
+- gRPC: `LedgerService/PostTransaction` (`cbl-protos@cf-1`), unchanged.
+- Kafka: unchanged.
+- Storage: schema unchanged; the seed `test/load/seed.sql` creates up to 256 account pairs
+  with deterministic UUIDs and initial balances.
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
-Без новых миграций. Сид-данные нагрузки не входят в продакшен-миграции: отдельный файл
-`test/load/seed.sql`, выполняется только на стенде нагрузки.
+No new migrations. The load seed data is not part of the production migrations: a separate file
+`test/load/seed.sql`, executed only on the load stand.
 
-## 6. Конечные автоматы и правила
+## 6. State machines and rules
 
-Не применимо. Профиль нагрузки: arrival-rate сценарий k6; ключ идемпотентности уникален
-на итерацию (`<RUN_ID>-<vu>-<iter>`, префикс запуска ограничен по длине и укладывается
-в лимит ключа 128 символов из 2.2), повторные вызовы не создают двойных эффектов.
+Not applicable. Load profile: the k6 arrival-rate scenario; the idempotency key is unique
+per iteration (`<RUN_ID>-<vu>-<iter>`, the run prefix is length-limited and fits
+the 128-character key limit from 2.2), repeated calls do not create double effects.
 
 ## 7. Edge cases
 
-Горячий счет (все транзакции в одну пару) - измеренный предел и retries; распределенный
-профиль - низкая конкуренция; рост нагрузки до пиковой 1.5x - 2x (14.2); переиспользование
-одного ключа идемпотентности k6 в пределах vu/iter; доступность PG в testcontainers/compose.
+Hot account (all transactions to one pair) - the measured limit and retries; the distributed
+profile - low contention; load growth to the peak 1.5x - 2x (14.2); reuse of
+one k6 idempotency key within vu/iter; PG availability in testcontainers/compose.
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-- Денежные сценарии только на реальном PostgreSQL (запрет моков, CBL-001).
-- Воспроизводимость: одна команда для бенчмарков (`make bench`), фиксированные команды
-  seed и k6 в шапке `test/load/post_transaction.js`; использована версия k6 2.3.0
-  (образ `grafana/k6`, PIN уточняется в 0.2).
-- Отчет содержит характеристики стенда (CPU, ОС, версия PostgreSQL, сеть Docker).
-- Длинное тире и float не используются; метрики не содержат денежных сумм пользователей.
+- Money scenarios only on real PostgreSQL (mocks are forbidden, CBL-001).
+- Reproducibility: one command for benchmarks (`make bench`), fixed seed and k6
+  commands in the header of `test/load/post_transaction.js`; k6 version 2.3.0 was used
+  (the `grafana/k6` image, the PIN is refined in 0.2).
+- The report contains the stand characteristics (CPU, OS, PostgreSQL version, Docker network).
+- Em dash and float are not used; metrics do not contain user money amounts.
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
-| Smoke | сборка, миграции, healthz (compose) |
-| Unit | не применимо к нагрузке; unit-набор репозитория не меняется |
-| Integration | бенчмарки на testcontainers PostgreSQL (hot, hot-parallel, distributed) |
-| E2E локальный | compose-стенд + k6: распределенный профиль (RATE=100..500), пороги CBL-002 |
-| Load | k6 официальный локальный профиль задачи (выполнен: 500 и 1000 rps, см. 3.1); глобальный профиль - 14.2 |
+| Smoke | build, migrations, healthz (compose) |
+| Unit | not applicable to load; the repository unit suite does not change |
+| Integration | benchmarks on testcontainers PostgreSQL (hot, hot-parallel, distributed) |
+| Local e2e | compose stand + k6: distributed profile (RATE=100..500), CBL-002 thresholds |
+| Load | k6 official local task profile (performed: 500 and 1000 rps, see 3.1); the global profile - 14.2 |
 
-Покрытие unit+integration не снижается (новый код только тестовый и нагрузочный).
+Unit+integration coverage does not decrease (the new code is test and load only).
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-1. Спека, Go-бенчмарки, k6-сценарий и сид.
-2. Прогоны: бенчмарки (hot, hot-parallel, distributed), k6 на compose.
-3. Отчет и ADR в спеке; обновление AGENTS.md (trade-offs, KI-ledger-03, журнал).
-4. Четыре ревью-прохода, линтеры, коммит `CBL-2.9: бенчмарк записи и стратегия шардирования`.
+1. Spec, Go benchmarks, the k6 scenario and the seed.
+2. Runs: benchmarks (hot, hot-parallel, distributed), k6 on compose.
+3. Report and ADR in the spec; AGENTS.md update (trade-offs, KI-ledger-03, journal).
+4. Four review passes, linters, commit `CBL-2.9: write benchmark and sharding strategy`.
 
-## 11. Открытые вопросы и решения
+## 11. Open questions and decisions
 
-- Партиционирование `entries` по времени (открытый вопрос 2.1): решение по результатам
-  оценки роста в 14.2; критерии в 3.2 (пункт 4).
-- Батчинг и шардирование горячего счета: стратегия зафиксирована в 3.2; реализация - задача
-  14.6 (E14 плана) при превышении порога 200 записей/с в один счет по итогам 14.2.
-- Стоимость deferred-триггера 00006 на многоentry-транзакциях: закрыта A/B-замером
-  (вывод 4 раздела 3.1).
-- Синтетический профиль k6 не воспроизводит долю чтений в миксе; глобальный смешанный
-  профиль - 14.1/14.2.
-- Тест уникальности ключа идемпотентности под нагрузкой покрыт integration-набором
-  (повтор с тем же телом), а не k6: каждый запуск использует свой префикс `RUN_ID`.
+- Time partitioning of `entries` (open question 2.1): the decision follows the results of the
+  growth estimate in 14.2; criteria in 3.2 (item 4).
+- Batching and sharding of the hot account: the strategy is fixed in 3.2; implementation - task
+  14.6 (E14 of the plan) on exceeding the threshold of 200 writes/s to a single account based on the results of 14.2.
+- The cost of the deferred trigger 00006 on many-entry transactions: closed by the A/B measurement
+  (conclusion 4 of section 3.1).
+- The synthetic k6 profile does not reproduce the read share in the mix; the global mixed
+  profile - 14.1/14.2.
+- The uniqueness test of the idempotency key under load is covered by the integration suite
+  (a repeat with the same body), not by k6: every run uses its own `RUN_ID` prefix.
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (14.10.2026): без контекста, архитектуры, с контекстом,
-безопасности (блокирующий). Blocker нет; вердикт безопасности PASS (с KI-ledger-06);
-все major и minor закрыты или зафиксированы.
+Four independent passes (14.10.2026): no-context, architecture, with-context,
+security (blocking). No blockers; the security verdict is PASS (with KI-ledger-06);
+all major and minor findings are closed or recorded.
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | вывод о триггере не подтвержден замером; пороги k6 не ловят транспортные отказы и отбросы; расхождение методики k6 (542/1021 вызовов/с против ставок); ключ в разделе 6 не совпадал со скриптом; метрика `retries_%` двусмысленна; distributed назван потолком системы | добавлены A/B-бенчмарки на 100 входов (вывод 4); в k6 добавлены `transport_failures` и пороги dropped; таблица 3.1 переведена на итерации за прогон; раздел 6 синхронизирован; метрика переименована в `retries_per_op`; docstring уточнен |
-| Архитектуры | нет владельца реализации мер защиты (14.2 - диагностика); стоимость триггера на многоentry не измерена; порог 200/с без вывода; нет отвергнутого варианта сериализации; «запас 4x» смешивает TPS и p99 | добавлена задача 14.6 в CBL-004; A/B-замер триггера; порог выведен из 283/с (~70%); добавлена отвергнутая альтернатива с обоснованием; вывод 1 разделяет запас TPS и p99 |
-| С контекстом | статус/журнал опережали ревью; `make bench` не покрывал все бенчмарки; двусмысленные единицы `retries_%`; typo и кириллица в латинице; нет `make bench`/k6 в AGENTS; PAIRS без нижней границы; `.js` не проверялся на тире | статус и журнал приведены в порядок; фильтр `-bench "."`; метрика переименована; опечатки исправлены; команды добавлены в AGENTS.md; `Math.max(1, ...)` добавлен; `.js` включен в `check-no-emdash.ps1` |
-| Безопасности | потолок пула без серверного deadline/ограничения очереди (вечное ожидание при насыщении); `DB_MAX_OPEN_CONNS` не ограничен сверху; warn-логи повторов под нагрузкой; k6 без пина образа; сборка без `.dockerignore` | зафиксирован KI-ledger-06 (timeout и очередь до prod; prod запрещен KI-ledger-02); кламп 100 и лог значений пула; подтверждено сэмплирование zap production; образ пинован `grafana/k6:2.3.0`; `.dockerignore` контекста services - в 0.2 |
+| No-context | the trigger conclusion was not confirmed by a measurement; the k6 thresholds do not catch transport failures and drops; a discrepancy in the k6 methodology (542/1021 calls/s against the rates); the key in section 6 did not match the script; the `retries_%` metric is ambiguous; distributed was called the system ceiling | A/B benchmarks on 100 entries added (conclusion 4); `transport_failures` and dropped thresholds added to k6; table 3.1 converted to iterations per run; section 6 synchronized; the metric renamed to `retries_per_op`; the docstring clarified |
+| Architecture | no owner for the implementation of protection measures (14.2 - diagnostics); the trigger cost on many entries was not measured; the 200/s threshold without a derivation; no rejected serialization option; the "4x margin" mixes TPS and p99 | task 14.6 added to CBL-004; the A/B trigger measurement; the threshold derived from 283/s (~70%); the rejected alternative added with rationale; conclusion 1 separates the TPS and p99 margins |
+| With-context | status/journal ran ahead of the review; `make bench` did not cover all benchmarks; ambiguous `retries_%` units; a typo and Cyrillic in the Latin text; no `make bench`/k6 in AGENTS; PAIRS without a lower bound; the `.js` was not checked for em dashes | status and journal brought in order; the `-bench "."` filter; the metric renamed; typos fixed; commands added to AGENTS.md; `Math.max(1, ...)` added; the `.js` included in `check-no-emdash.ps1` |
+| Security | the pool ceiling without a server deadline/queue limit (infinite wait on saturation); `DB_MAX_OPEN_CONNS` not bounded from above; retry warn logs under load; k6 without an image pin; the build without `.dockerignore` | KI-ledger-06 recorded (timeout and queue before prod; prod is forbidden by KI-ledger-02); the clamp of 100 and logging of pool values; zap production sampling confirmed; the image pinned to `grafana/k6:2.3.0`; `.dockerignore` of the services context - in 0.2 |

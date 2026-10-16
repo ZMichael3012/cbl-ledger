@@ -19,24 +19,24 @@ import (
 	"github.com/cbl/cbl-ledger/internal/storage"
 )
 
-// Константы событий ledger.events (CBL-003, раздел 6).
+// ledger.events event constants (CBL-003, section 6).
 const (
-	// ProducerLedger задает имя сервиса-продюсера событий леджера.
+	// ProducerLedger sets the name of the ledger event producer service.
 	ProducerLedger = "cbl-ledger"
-	// TopicLedgerEvents задает топик событий леджера.
+	// TopicLedgerEvents sets the ledger events topic.
 	TopicLedgerEvents = "ledger.events"
-	// SchemaVersion задает версию схемы событий леджера.
+	// SchemaVersion sets the version of the ledger event schema.
 	SchemaVersion = "v1"
 )
 
-// LedgerEventSink собирает protobuf-конверты ledger.events и пишет их в outbox
-// в транзакции бизнес-изменения (storage.TxnEventSink).
+// LedgerEventSink builds ledger.events protobuf envelopes and writes them to the outbox
+// within the business change transaction (storage.TxnEventSink).
 type LedgerEventSink struct {
 	store *outbox.Store
 	log   *zap.Logger
 }
 
-// NewLedgerEventSink создает LedgerEventSink.
+// NewLedgerEventSink creates a LedgerEventSink.
 func NewLedgerEventSink(log *zap.Logger) *LedgerEventSink {
 	if log == nil {
 		log = zap.NewNop()
@@ -44,7 +44,7 @@ func NewLedgerEventSink(log *zap.Logger) *LedgerEventSink {
 	return &LedgerEventSink{store: outbox.NewStore(), log: log}
 }
 
-// AppendTxnEvent собирает конверт события и записывает его в outbox.
+// AppendTxnEvent builds the event envelope and writes it to the outbox.
 func (s *LedgerEventSink) AppendTxnEvent(ctx context.Context, tx *gorm.DB, event storage.TxnEvent) error {
 	envelope, err := buildLedgerEventEnvelope(event)
 	if err != nil {
@@ -60,8 +60,8 @@ func (s *LedgerEventSink) AppendTxnEvent(ctx context.Context, tx *gorm.DB, event
 	return nil
 }
 
-// buildLedgerEventEnvelope собирает конверт ledger.events: protobuf-тело
-// billing.events.v1.LedgerEvent и заголовки конверта CBL.
+// buildLedgerEventEnvelope builds the ledger.events envelope: the protobuf body
+// billing.events.v1.LedgerEvent and the CBL envelope headers.
 func buildLedgerEventEnvelope(event storage.TxnEvent) (outbox.Envelope, error) {
 	if event.OccurredAt.IsZero() {
 		return outbox.Envelope{}, fmt.Errorf("usecase: event %s has zero occurred_at", event.Type)
@@ -103,7 +103,7 @@ func buildLedgerEventEnvelope(event storage.TxnEvent) (outbox.Envelope, error) {
 	return envelope, nil
 }
 
-// ledgerEventType переводит строковый тип события в контрактный enum.
+// ledgerEventType converts the string event type into the contract enum.
 func ledgerEventType(eventType string) eventsv1.LedgerEventType {
 	switch eventType {
 	case storage.EventTransactionPosted:
@@ -119,7 +119,7 @@ func ledgerEventType(eventType string) eventsv1.LedgerEventType {
 	}
 }
 
-// entryDirection переводит доменное направление в контрактное.
+// entryDirection converts the domain direction into the contract one.
 func entryDirection(direction domain.Direction) commonv1.Direction {
 	switch direction {
 	case domain.DirectionDebit:
@@ -131,7 +131,7 @@ func entryDirection(direction domain.Direction) commonv1.Direction {
 	}
 }
 
-// decimalsToUint32 безопасно переводит decimals в uint32 контракта.
+// decimalsToUint32 safely converts decimals into the contract uint32.
 func decimalsToUint32(decimals int32) uint32 {
 	if decimals < 0 {
 		return 0

@@ -1,7 +1,7 @@
 -- +goose Up
--- Резервы (удержания) под сагу выплат и возвратов: Reserve переводит средства
--- из available в reserved, CommitReserve превращает удержание в сбалансированную
--- проводку на счет выплат, ReleaseReserve возвращает средства без проводки.
+-- Reserves (holds) for the payout and refund saga: Reserve moves funds
+-- from available to reserved, CommitReserve turns the hold into a balanced
+-- entry to the payout account, ReleaseReserve returns the funds without an entry.
 CREATE TABLE reserves (
     id                      uuid PRIMARY KEY,
     account_id              uuid NOT NULL REFERENCES accounts (id),

@@ -1,6 +1,6 @@
--- Сид счетов для нагрузочного теста CBL-2.9 (только стенд нагрузки, не продакшен-миграция).
--- 256 пар: debit-счет (с балансом) и credit-счет (нулевой) с детерминированными UUID,
--- которые k6-сценарий вычисляет повторно (test/load/post_transaction.js).
+-- Account seed for the CBL-2.9 load test (load stand only, not a production migration).
+-- 256 pairs: a debit account (with a balance) and a credit account (zero) with deterministic UUIDs
+-- that the k6 scenario recomputes (test/load/post_transaction.js).
 
 INSERT INTO accounts (id, type, asset, decimals, merchant_ref)
 SELECT ('00000000-0000-4000-8000-' || lpad(to_hex(i), 12, '0'))::uuid,

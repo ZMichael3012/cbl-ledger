@@ -1,17 +1,17 @@
 # cbl-ledger
 
-Двойная запись, резервы и балансы: источник истины о деньгах.
+Double entry, reserves and balances: the source of truth about money.
 
-Роль сервиса и контракты: `AGENTS.md`. Глобальные правила платформы: `../../AGENTS.md`,
+Service role and contracts: `AGENTS.md`. Platform global rules: `../../AGENTS.md`,
 `../../.specs/CBL-000-system-description.md`, `../../.specs/CBL-003-contracts.md`.
 
-## Команды
+## Commands
 
 ```powershell
-make build        # сборка
-make test         # мокнутые unit-тесты
+make build        # build
+make test         # mocked unit tests
 make vet          # go vet
-make lint         # golangci-lint в Docker
-make up           # зависимости + сервис в docker-compose
+make lint         # golangci-lint in Docker
+make up           # dependencies + service in docker-compose
 make down
 ```

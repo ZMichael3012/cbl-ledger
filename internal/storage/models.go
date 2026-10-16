@@ -1,146 +1,146 @@
-// Пакет storage содержит доступ к хранилищам сервиса ledger:
-// GORM-модели, миграции, репозиторий проводок.
+// Package storage provides access to the ledger service storages:
+// GORM models, migrations, and the posting repository.
 package storage
 
 import "time"
 
-// Account описывает строку таблицы accounts.
+// Account describes a row of the accounts table.
 type Account struct {
-	// ID задает идентификатор счета: UUIDv7 или детерминированный UUIDv5 плана счетов (2.6).
+	// ID sets the account identifier: UUIDv7 or the deterministic UUIDv5 of the account plan (2.6).
 	ID string `gorm:"column:id;type:uuid;primaryKey"`
-	// Type задает тип счета плана счетов.
+	// Type sets the account type of the account plan.
 	Type string `gorm:"column:type"`
-	// Asset задает код актива счета.
+	// Asset sets the account asset code.
 	Asset string `gorm:"column:asset"`
-	// Decimals задает количество знаков после точки.
+	// Decimals sets the number of decimal places.
 	Decimals int32 `gorm:"column:decimals"`
-	// MerchantRef задает ссылку на мерчанта для счетов мерчанта.
+	// MerchantRef sets the merchant reference for merchant accounts.
 	MerchantRef *string `gorm:"column:merchant_ref"`
-	// CreatedAt задает время создания счета.
+	// CreatedAt sets the account creation time.
 	CreatedAt time.Time `gorm:"column:created_at"`
 }
 
-// TableName задает имя таблицы accounts.
+// TableName sets the accounts table name.
 func (Account) TableName() string { return "accounts" }
 
-// Transaction описывает строку таблицы transactions.
+// Transaction describes a row of the transactions table.
 type Transaction struct {
-	// ID задает UUIDv7 транзакции.
+	// ID sets the transaction UUIDv7.
 	ID string `gorm:"column:id;type:uuid;primaryKey"`
-	// IdempotencyKey задает ключ идемпотентности транзакции.
+	// IdempotencyKey sets the transaction idempotency key.
 	IdempotencyKey string `gorm:"column:idempotency_key"`
-	// RefType задает тип ссылки бизнес-операции.
+	// RefType sets the reference type of the business operation.
 	RefType string `gorm:"column:ref_type"`
-	// RefID задает идентификатор бизнес-операции.
+	// RefID sets the identifier of the business operation.
 	RefID string `gorm:"column:ref_id"`
-	// RequestHash задает канонический хэш тела запроса для контроля повтора ключа.
+	// RequestHash sets the canonical hash of the request body for key reuse control.
 	RequestHash string `gorm:"column:request_hash"`
-	// CreatedAt задает время проводки.
+	// CreatedAt sets the posting time.
 	CreatedAt time.Time `gorm:"column:created_at"`
 }
 
-// TableName задает имя таблицы transactions.
+// TableName sets the transactions table name.
 func (Transaction) TableName() string { return "transactions" }
 
-// Entry описывает строку таблицы entries; таблица append-only.
+// Entry describes a row of the entries table; the table is append-only.
 type Entry struct {
-	// ID задает монотонный идентификатор проводки.
+	// ID sets the monotonic entry identifier.
 	ID int64 `gorm:"column:id;primaryKey"`
-	// TransactionID задает транзакцию проводки.
+	// TransactionID sets the transaction of the entry.
 	TransactionID string `gorm:"column:transaction_id;type:uuid"`
-	// AccountID задает счет проводки.
+	// AccountID sets the account of the entry.
 	AccountID string `gorm:"column:account_id;type:uuid"`
-	// Direction задает направление проводки.
+	// Direction sets the direction of the entry.
 	Direction string `gorm:"column:direction"`
-	// Amount задает сумму в минимальных единицах актива.
+	// Amount sets the amount in asset minor units.
 	Amount int64 `gorm:"column:amount"`
-	// CreatedAt задает время проводки.
+	// CreatedAt sets the entry time.
 	CreatedAt time.Time `gorm:"column:created_at"`
 }
 
-// TableName задает имя таблицы entries.
+// TableName sets the entries table name.
 func (Entry) TableName() string { return "entries" }
 
-// Balance описывает строку таблицы balances с оптимистичной блокировкой.
+// Balance describes a row of the balances table with optimistic locking.
 type Balance struct {
-	// AccountID задает счет баланса.
+	// AccountID sets the account of the balance.
 	AccountID string `gorm:"column:account_id;type:uuid;primaryKey"`
-	// Available задает доступный остаток в минимальных единицах.
+	// Available sets the available balance in minor units.
 	Available int64 `gorm:"column:available"`
-	// Reserved задает зарезервированный остаток в минимальных единицах.
+	// Reserved sets the reserved balance in minor units.
 	Reserved int64 `gorm:"column:reserved"`
-	// LockVersion задает версию оптимистичной блокировки.
+	// LockVersion sets the optimistic lock version.
 	LockVersion int64 `gorm:"column:lock_version"`
-	// UpdatedAt задает время последнего изменения.
+	// UpdatedAt sets the last modification time.
 	UpdatedAt time.Time `gorm:"column:updated_at"`
 }
 
-// TableName задает имя таблицы balances.
+// TableName sets the balances table name.
 func (Balance) TableName() string { return "balances" }
 
-// TransactionBalance описывает снимок баланса счета после проводки.
+// TransactionBalance describes a snapshot of the account balance after an entry.
 type TransactionBalance struct {
-	// TransactionID задает транзакцию снимка.
+	// TransactionID sets the transaction of the snapshot.
 	TransactionID string `gorm:"column:transaction_id;type:uuid;primaryKey"`
-	// AccountID задает счет снимка.
+	// AccountID sets the account of the snapshot.
 	AccountID string `gorm:"column:account_id;type:uuid;primaryKey"`
-	// Available задает доступный остаток после проводки.
+	// Available sets the available balance after the entry.
 	Available int64 `gorm:"column:available"`
-	// Reserved задает зарезервированный остаток после проводки.
+	// Reserved sets the reserved balance after the entry.
 	Reserved int64 `gorm:"column:reserved"`
-	// CreatedAt задает время снимка (для будущего партиционирования и ретеншена).
+	// CreatedAt sets the snapshot time (for future partitioning and retention).
 	CreatedAt time.Time `gorm:"column:created_at"`
 }
 
-// TableName задает имя таблицы transaction_balances.
+// TableName sets the transaction_balances table name.
 func (TransactionBalance) TableName() string { return "transaction_balances" }
 
-// Reserve описывает строку таблицы reserves: удержание средств под внешнюю операцию.
+// Reserve describes a row of the reserves table: a hold of funds for an external operation.
 type Reserve struct {
-	// ID задает UUIDv7 резерва.
+	// ID sets the reserve UUIDv7.
 	ID string `gorm:"column:id;type:uuid;primaryKey"`
-	// AccountID задает счет удержания.
+	// AccountID sets the hold account.
 	AccountID string `gorm:"column:account_id;type:uuid"`
-	// Amount задает сумму удержания в минимальных единицах актива.
+	// Amount sets the hold amount in asset minor units.
 	Amount int64 `gorm:"column:amount"`
-	// RefID задает бизнес-ссылку удержания (например, payout_id).
+	// RefID sets the hold business reference (for example, payout_id).
 	RefID string `gorm:"column:ref_id"`
-	// Status задает состояние резерва: active, committed или released.
+	// Status sets the reserve state: active, committed, or released.
 	Status string `gorm:"column:status"`
-	// IdempotencyKey задает ключ идемпотентности создания резерва.
+	// IdempotencyKey sets the idempotency key of the reserve creation.
 	IdempotencyKey string `gorm:"column:idempotency_key"`
-	// RequestHash задает канонический хэш тела запроса резерва.
+	// RequestHash sets the canonical hash of the reserve request body.
 	RequestHash string `gorm:"column:request_hash"`
-	// Reason задает причину возврата резерва.
+	// Reason sets the reason for the reserve release.
 	Reason string `gorm:"column:reason"`
-	// TransactionID задает проводку захвата резерва (для committed).
+	// TransactionID sets the posting of the reserve capture (for committed).
 	TransactionID *string `gorm:"column:transaction_id;type:uuid"`
-	// CounterpartyAccountID задает счет выплат, получивший средства при захвате.
+	// CounterpartyAccountID sets the payout account that received the funds on capture.
 	CounterpartyAccountID *string `gorm:"column:counterparty_account_id;type:uuid"`
-	// CreatedAt задает время создания резерва.
+	// CreatedAt sets the reserve creation time.
 	CreatedAt time.Time `gorm:"column:created_at"`
-	// UpdatedAt задает время последнего изменения резерва.
+	// UpdatedAt sets the last modification time of the reserve.
 	UpdatedAt time.Time `gorm:"column:updated_at"`
 }
 
-// TableName задает имя таблицы reserves.
+// TableName sets the reserves table name.
 func (Reserve) TableName() string { return "reserves" }
 
-// ReserveOperation описывает строку таблицы reserve_operations: ключ захвата или возврата.
+// ReserveOperation describes a row of the reserve_operations table: a capture or release key.
 type ReserveOperation struct {
-	// ID задает монотонный идентификатор операции.
+	// ID sets the monotonic operation identifier.
 	ID int64 `gorm:"column:id;primaryKey"`
-	// ReserveID задает резерв операции.
+	// ReserveID sets the reserve of the operation.
 	ReserveID string `gorm:"column:reserve_id;type:uuid"`
-	// Op задает вид операции: commit или release.
+	// Op sets the operation kind: commit or release.
 	Op string `gorm:"column:op"`
-	// IdempotencyKey задает ключ идемпотентности операции.
+	// IdempotencyKey sets the operation idempotency key.
 	IdempotencyKey string `gorm:"column:idempotency_key"`
-	// RequestHash задает канонический хэш тела операции.
+	// RequestHash sets the canonical hash of the operation body.
 	RequestHash string `gorm:"column:request_hash"`
-	// CreatedAt задает время операции.
+	// CreatedAt sets the operation time.
 	CreatedAt time.Time `gorm:"column:created_at"`
 }
 
-// TableName задает имя таблицы reserve_operations.
+// TableName sets the reserve_operations table name.
 func (ReserveOperation) TableName() string { return "reserve_operations" }

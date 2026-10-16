@@ -150,7 +150,7 @@ func TestBuildCompletedPosting(t *testing.T) {
 	})
 
 	t.Run("payment id canonicalized", func(t *testing.T) {
-		// Бизнес-ключ обязан не зависеть от формы UUID в событии.
+		// The business key must not depend on the UUID notation in the event.
 		upper := completedEvent("01A138FD-0000-7000-8000-000000000001", "m-1", 100, nil)
 		posting, err := buildCompletedPosting(upper)
 		require.NoError(t, err)
@@ -186,7 +186,7 @@ func TestBuildCompletedPosting(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, err := buildCompletedPosting(event)
 			require.Error(t, err)
-			assert.True(t, errors.Is(err, errInvalidPaymentEvent), "должна быть доменная ошибка: %v", err)
+			assert.True(t, errors.Is(err, errInvalidPaymentEvent), "a domain error is expected: %v", err)
 		})
 	}
 }

@@ -1,169 +1,169 @@
-# CBL-2.3. Конкуренция: оптимистичные блокировки, повторы с jitter, горячие счета
+# CBL-2.3. Concurrency: optimistic locking, retries with jitter, hot accounts
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E2, Ledger |
-| Репозиторий | `cbl-ledger` |
-| Размер | L |
-| Волна и параллельная группа | W1-LEDGER |
-| Зависит от | 2.2, CF-1 |
-| Версия контрактов | `cbl-protos@cf-1` (`billing/ledger/v1`) |
-| Статус | done (ревью закрыто, коммит CBL-2.3) |
+| Epic | E2, Ledger |
+| Repository | `cbl-ledger` |
+| Size | L |
+| Wave and parallel group | W1-LEDGER |
+| Depends on | 2.2, CF-1 |
+| Contract version | `cbl-protos@cf-1` (`billing/ledger/v1`) |
+| Status | done (review closed, commit CBL-2.3) |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Задача 2.2 уже реализовала базовый каркас конкуренции: CAS по `lock_version`, повторы при
-конфликте, детерминированный порядок апдейтов. Задача 2.3 доводит механизм до эксплуатационного
-качества: управляемая политика повторов с полным jitter, наблюдаемость конфликтов, второй
-барьер БД для сбалансированности проводок (T-LED-02) и доказанные под нагрузкой инварианты
-горячих счетов (`CBL-000`, инварианты 2 - 5; `CBL-004`, риск «горячие счета леджера»).
+Task 2.2 already implemented the basic concurrency framework: CAS on `lock_version`, retries
+on conflict, a deterministic update order. Task 2.3 brings the mechanism to operational
+quality: a managed retry policy with full jitter, conflict observability, a second
+DB barrier for entry balance (T-LED-02) and hot account invariants proven under load
+(`CBL-000`, invariants 2 - 5; `CBL-004`, the "hot ledger accounts" risk).
 
-Цель: при конкурентных проводках по одному счету невозможны потерянные обновления, двойной
-эффект и отрицательный баланс; стратегия повторов настраиваема и измерима; решение о
-шардировании и батчинге принимается в 2.9 на основе бенчмарка этого механизма.
+Goal: under concurrent postings to one account, lost updates, double effect and a negative
+balance are impossible; the retry strategy is configurable and measurable; the sharding and
+batching decision is made in 2.9 based on the benchmark of this mechanism.
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: политика повторов `RetryPolicy` (число попыток, базовая пауза, потолок, полный
-jitter), хук наблюдаемости `RetryObserver`, исправление ожидания после последней попытки,
-миграция 00006 (constraint trigger сбалансированности), конкурентные тесты горячего счета,
-черезвычайное завершение повторов в `ErrConflict`, бенчмарк горячего счета (заготовка для 2.9).
+In scope: the `RetryPolicy` retry policy (attempt count, base pause, ceiling, full
+jitter), the `RetryObserver` observability hook, the fix of the wait after the last attempt,
+migration 00006 (the balance constraint trigger), concurrent hot account tests,
+emergency termination of retries in `ErrConflict`, the hot account benchmark (a prototype for 2.9).
 
-Out of scope: шардирование и батчинг (2.9), резервы (2.4), consumer событий (2.7), метрики
-Prometheus (0.7, 14.4; здесь только хук), смена модели блокировок.
+Out of scope: sharding and batching (2.9), reserves (2.4), event consumer (2.7), Prometheus
+metrics (0.7, 14.4; only the hook here), changing the locking model.
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. Политика повторов: `RetryPolicy{MaxAttempts int, BaseDelay, MaxDelay time.Duration}`.
-Значение по умолчанию: 8 попыток, 5 мс база, 250 мс потолок. Невалидные значения
-(ноль, минус, `MaxDelay < BaseDelay`) нормализуются: поля заменяются значениями по умолчанию,
-потолок ниже базы поднимается до базы, `MaxAttempts` ограничивается сверху значением 32
-(защита долгоживущих вызовов, consumer 2.7). Нормализация идемпотентна и применяется на каждой
-проводке, чтобы нулевое значение `Repository` работало без явной конфигурации.
+FR-1. Retry policy: `RetryPolicy{MaxAttempts int, BaseDelay, MaxDelay time.Duration}`.
+Default: 8 attempts, 5 ms base, 250 ms ceiling. Invalid values
+(zero, negative, `MaxDelay < BaseDelay`) are normalized: the fields are replaced with the default
+values, a ceiling below the base is raised to the base, `MaxAttempts` is capped above at 32
+(protection against long-lived calls, consumer 2.7). Normalization is idempotent and is applied on
+every posting so that a zero-value `Repository` works without explicit configuration.
 
-FR-2. Задержка между попытками - полный jitter: `rand(0, min(MaxDelay, BaseDelay << attempt))`
-с защитой от переполнения int64 при экстремальных `MaxDelay`. Суммарный бюджет повторов
-ограничен: 8 попыток дают не более ~1 с ожидания. Ожидание прерывается `ctx.Done()`;
-после последней попытки ожидание не выполняется (дефект 2.2).
+FR-2. The delay between attempts is full jitter: `rand(0, min(MaxDelay, BaseDelay << attempt))`
+with protection against int64 overflow at extreme `MaxDelay`. The total retry budget is
+bounded: 8 attempts give no more than ~1 s of waiting. The wait is interrupted by `ctx.Done()`;
+after the last attempt the wait is not performed (a defect of 2.2).
 
-FR-3. Повторяемые причины: конфликт `lock_version`, гонка вставки ключа идемпотентности
-(23505), deadlock PostgreSQL (40P01). Исчерпание попыток возвращает `ErrConflict`
-(`conflict`, resource_exhausted) и оборачивает последнюю причину отказа; неконкурентные
-ошибки не повторяются.
+FR-3. Retryable causes: a `lock_version` conflict, an idempotency key insert race
+(23505), a PostgreSQL deadlock (40P01). Exhausting the attempts returns `ErrConflict`
+(`conflict`, resource_exhausted) and wraps the last failure cause; non-concurrency
+errors are not retried.
 
-FR-4. Наблюдаемость: `RetryObserver func(RetryEvent)`; `RetryEvent{Attempt int, Cause string,
-Delay time.Duration}`, где `Cause` - `lock_conflict`, `idempotency_race`, `deadlock` или
-`unknown`. `main` подключает observer с логом уровня warn (attempt, cause, delay); хук
-переиспользуется метриками в 0.7/14.4. Observer вызывается перед паузой; последняя
-неуспешная попытка паузы не имеет и события не порождает (терминальный отказ виден по
-`ErrConflict` и метрике ошибок). Observer может вызываться конкурентно и не должен паниковать.
+FR-4. Observability: `RetryObserver func(RetryEvent)`; `RetryEvent{Attempt int, Cause string,
+Delay time.Duration}`, where `Cause` is `lock_conflict`, `idempotency_race`, `deadlock` or
+`unknown`. `main` wires an observer with a warn-level log (attempt, cause, delay); the hook
+is reused by metrics in 0.7/14.4. The observer is called before the pause; the last
+unsuccessful attempt has no pause and produces no event (the terminal failure is visible through
+`ErrConflict` and the error metric). The observer may be called concurrently and must not panic.
 
-FR-5. Горячие счета: глобальные локи и `SELECT ... FOR UPDATE` не используются; конфликты
-разрешаются только CAS и повторами (T-06). Число круговых обращений на проводку не растет:
-проверки баланса остаются в read-коммитед транзакции, апдейт баланса - детерминированный
-CAS с проверкой нехватки средств до записи.
+FR-5. Hot accounts: global locks and `SELECT ... FOR UPDATE` are not used; conflicts
+are resolved only by CAS and retries (T-06). The number of round trips per posting does not grow:
+balance checks stay in the read-committed transaction, the balance update is a deterministic
+CAS with an insufficient funds check before the write.
 
-FR-6. Второй барьер БД (T-LED-02): миграция 00006 добавляет отложенный (deferred) constraint
-trigger на `entries`: на коммите транзакции сумма дебетов обязана равняться сумме кредитов и
-число проводок быть не менее двух, иначе коммит отклоняется. Барьер срабатывает даже при
-прямой вставке в обход приложения. Функция триггера обращается к `public.entries` и фиксирует
-`search_path` (pg_catalog, pg_temp); ограничения барьера - раздел 11.
+FR-6. Second DB barrier (T-LED-02): migration 00006 adds a deferred constraint
+trigger on `entries`: at transaction commit the sum of debits must equal the sum of credits and
+the number of entries must be at least two, otherwise the commit is rejected. The barrier fires even
+on a direct insert bypassing the application. The trigger function addresses `public.entries`
+and pins `search_path` (pg_catalog, pg_temp); the barrier limitations are in section 11.
 
-FR-7. Инварианты под конкуренцией (проверяются тестами): баланс горячего счета равен
-начальному значению плюс сумма примененных дельт; ни одна успешная проводка не теряется;
-сумма успешных дебетов равна сумме успешных кредитов; отрицательный баланс merchant/payout
-невозможен.
+FR-7. Invariants under concurrency (verified by tests): the hot account balance equals the
+initial value plus the sum of applied deltas; no successful posting is lost;
+the sum of successful debits equals the sum of successful credits; a negative merchant/payout balance
+is impossible.
 
-## 4. Контракты
+## 4. Contracts
 
-- gRPC: `LedgerService.PostTransaction` без изменений (`cbl-protos@cf-1`).
-- Kafka: без изменений.
-- Хранилище: новая миграция `migrations/00006_entries_balanced.sql`; схема таблиц не меняется.
+- gRPC: `LedgerService.PostTransaction` unchanged (`cbl-protos@cf-1`).
+- Kafka: unchanged.
+- Storage: a new migration `migrations/00006_entries_balanced.sql`; the table schema does not change.
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
 ```sql
 CREATE FUNCTION entries_transaction_balanced() RETURNS trigger
--- на коммите: SUM(debit) = SUM(credit) и COUNT(*) >= 2 для NEW.transaction_id
+-- on commit: SUM(debit) = SUM(credit) and COUNT(*) >= 2 for NEW.transaction_id
 CREATE CONSTRAINT TRIGGER entries_transaction_balanced_trigger
     AFTER INSERT ON entries DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION entries_transaction_balanced();
 ```
 
-Отложенность обязательна: проводки вставляются по одной, промежуточное состояние
-несбалансированно. Стоимость (агрегат на строку в коммите) измеряется в 2.9 по индексу
-`entries_transaction_idx`; при подтвержденной деградации - вынос проверки в пакетную задачу
-(открытый вопрос 2.9).
+Deferral is mandatory: entries are inserted one by one, the intermediate state is unbalanced.
+The cost (one aggregate per row at commit) is measured in 2.9 using the
+`entries_transaction_idx` index; in case of confirmed degradation, the check is moved to a batch job
+(open question of 2.9).
 
-## 6. Конечные автоматы и правила
+## 6. State machines and rules
 
-Не применимо; транзакция атомарна. Правило повторов: retryable ошибка -> пауза с jitter ->
-следующая попытка; иначе возврат. Повтор ключа с тем же телом не является повтором на уровне
-БД (идемпотентный replay, FR-2 задачи 2.2).
+Not applicable; the transaction is atomic. Retry rule: a retryable error -> a pause with jitter ->
+the next attempt; otherwise return. A key replay with the same body is not a retry at the
+DB level (idempotent replay, FR-2 of task 2.2).
 
 ## 7. Edge cases
 
-Исчерпание попыток (ErrConflict с последней причиной, эффекта нет), отмена контекста в паузе,
-deadlock при встречных транзакциях, длинная цепочка конфликтов на одном счете, прямой SQL
-в обход приложения (барьер 00006), большое число проводок в транзакции (лимит 100 из 2.2),
-переполнение int64 (проверки 2.2 сохранены), нулевая политика (нормализация), экстремальные
-значения политики (потолок `math.MaxInt64`, сотни попыток - защита и потолок 32).
+Attempt exhaustion (ErrConflict with the last cause, no effect), context cancellation during a pause,
+deadlock on opposing transactions, a long chain of conflicts on one account, direct SQL
+bypassing the application (barrier 00006), a large number of entries in a transaction (the limit of
+100 from 2.2), int64 overflow (the 2.2 checks are preserved), a zero policy (normalization), extreme
+policy values (a `math.MaxInt64` ceiling, hundreds of attempts - protection and the ceiling of 32).
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-- Латентность повторов: не более ~1 с суммарно на 8 попыток (полный jitter, потолок 250 мс).
-- Наблюдаемость: warn-лог на каждый повтор; счетчики конфликтов в 0.7/14.4 через observer.
-- Безопасность: без изменений (KI-ledger-02 в силе); входные лимиты 2.2 сохранены.
-- Бенчмарк горячего счета: Go-бенчмарк в integration-наборе для задачи 2.9.
+- Retry latency: no more than ~1 s in total for 8 attempts (full jitter, a 250 ms ceiling).
+- Observability: a warn log on every retry; conflict counters in 0.7/14.4 through the observer.
+- Security: unchanged (KI-ledger-02 stands); the 2.2 input limits are preserved.
+- Hot account benchmark: a Go benchmark in the integration suite for task 2.9.
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
-| Smoke | `go build ./...`, миграции применяются на чистой базе (00006) |
-| Unit | нормализация политики (включая потолок 32); границы, потолок и защита от переполнения `nextDelay`; строки причин повторов |
-| Integration | горячий счет: 24 горутины x 5 проводок, сохранение денег и баланса, зафиксированные повторы (observer); детерминированное исчерпание попыток (`MaxAttempts=1`, удержанный чужой лок строки баланса, ожидание `pg_stat_activity`): `ErrConflict`, транзакций и проводок нет, средства не списаны; trigger 00006: несбалансированная вставка отклонена, одиночная проводка отклонена, сбалансированная прямая вставка разрешена |
-| E2E локальный | без изменений: compose smoke леджера; сценарии e2e - в 2.4 (KI-ledger-03) |
-| Load | k6 и профиль - 2.9; здесь Go-бенчмарк горячего счета (2.9 дополнит параллельным профилем) |
+| Smoke | `go build ./...`, migrations apply on a clean database (00006) |
+| Unit | policy normalization (including the ceiling of 32); boundaries, ceiling and overflow protection of `nextDelay`; retry cause strings |
+| Integration | hot account: 24 goroutines x 5 postings, preservation of money and balance, recorded retries (observer); deterministic attempt exhaustion (`MaxAttempts=1`, a held foreign balance row lock, waiting for `pg_stat_activity`): `ErrConflict`, no transactions or entries, funds are not debited; trigger 00006: an unbalanced insert is rejected, a single posting is rejected, a balanced direct insert is allowed |
+| E2E local | unchanged: the ledger compose smoke; e2e scenarios are in 2.4 (KI-ledger-03) |
+| Load | k6 and the profile are in 2.9; here the Go hot account benchmark (2.9 will complement it with a parallel profile) |
 
-Целевое покрытие unit+integration: не ниже 80% (факт фиксируется в разделе 12).
+Target unit+integration coverage: at least 80% (the actual value is recorded in section 12).
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-1. Спека (этот файл), тесты (unit + integration, включая бенчмарк), затем реализация.
-2. Миграция 00006, изменения `repository.go`, `main.go`.
-3. Четыре ревью-прохода CBL-001 шага 6, закрытие замечаний.
-4. Обновление AGENTS.md (T-LED-01, T-LED-02, журнал), линтеры, коммит
-   `CBL-2.3: повторы с jitter и защита балансов на уровне БД`.
+1. Spec (this file), tests (unit + integration, including the benchmark), then implementation.
+2. Migration 00006, changes to `repository.go`, `main.go`.
+3. Four review passes of CBL-001 step 6, closing the findings.
+4. AGENTS.md update (T-LED-01, T-LED-02, journal), linters, commit
+   `CBL-2.3: retries with jitter and DB-level balance protection`.
 
-## 11. Открытые вопросы и решения
+## 11. Open questions and decisions
 
-- ADR: constraint trigger против триггера на `transactions` - выбран `entries` с
-  отложенным срабатыванием: проверка видит все строки транзакции на коммите и не требует
-  дублирующего состояния в `transactions`.
-- ADR: полный jitter вместо экспоненциальной паузы без jitter: снижает синхронные
-  повторные столкновения при одинаковых конфликтах (thundering herd).
-- Открытый вопрос 2.9: стоимость отложенного триггера на проводках с десятками entry
-  (агрегат на строку коммита); решение о пакетной проверке принимается по бенчмарку.
-- Открытый вопрос 2.9: порог деградации TPS горячего счета, после которого вводится
-  шардирование/батчинг (T-LED-01, T-06).
-- Принятое ограничение: барьер не запрещает дописывание сбалансированной пары проводок к уже
-  закоммиченной транзакции (append-only запрещает только UPDATE/DELETE). Прямая вставка в
-  обход приложения вне модели угроз, денежного эффекта нет; балансы и выписки по счетам
-  остаются корректными.
-- Принятое ограничение: барьер проверяет числовое равенство сумм и не проверяет единство
-  актива и decimals проводок; на уровне приложения действует `ErrAssetMismatch` (2.2),
-  прямой SQL вне модели угроз.
+- ADR: a constraint trigger versus a trigger on `transactions` - `entries` with
+  deferred firing was chosen: the check sees all transaction rows at commit and does not require
+  duplicate state in `transactions`.
+- ADR: full jitter instead of an exponential pause without jitter: it reduces synchronized
+  repeated collisions on identical conflicts (thundering herd).
+- Open question of 2.9: the cost of the deferred trigger on postings with dozens of entry
+  rows (one aggregate per commit row); the batch check decision is made based on the benchmark.
+- Open question of 2.9: the hot account TPS degradation threshold beyond which
+  sharding/batching is introduced (T-LED-01, T-06).
+- Accepted limitation: the barrier does not forbid appending a balanced pair of postings to an
+  already committed transaction (append-only forbids only UPDATE/DELETE). A direct insert
+  bypassing the application is outside the threat model, there is no money effect; balances and
+  account statements remain correct.
+- Accepted limitation: the barrier checks the numeric equality of sums and does not check the
+  uniformity of the asset and decimals of the entries; at the application level
+  `ErrAssetMismatch` applies (2.2), direct SQL is outside the threat model.
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (14.10.2026): без контекста, архитектуры, с контекстом,
-безопасности (блокирующий). Blocker нет; вердикт безопасности PASS; все major и minor
-закрыты или зафиксированы как принятые ограничения.
+Four independent passes (14.10.2026): no-context, architecture, with-context,
+security (blocking). There are no blockers; the security verdict is PASS; all major and minor
+findings are closed or recorded as accepted limitations.
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | FR-1 и код расходились в трактовке `MaxDelay < BaseDelay`; переполнение `nextDelay` на экстремальных значениях; тест исчерпания попыток мог быть ложно-зеленым; спека 16 горутин против 24 в коде | FR-1 переформулирован (зажим потолка, потолок 32); overflow-защита `nextDelay` + unit-тест; детерминированный тест исчерпания через удержанный лок; спека синхронизирована |
-| Архитектуры | AGENTS.md не обновлен (T-LED-01, T-LED-02, журнал); терминальный конфликт терял причину; `MaxAttempts` не ограничен сверху | AGENTS.md обновлен; `ErrConflict` оборачивает последнюю причину; потолок 32 в нормализации |
-| С контекстом | AGENTS.md не обновлен; переполнение `nextDelay`; дублирование SQL-каркаса в тестах; опечатка в спеке; статусы коммитов 2.1/2.2 в журнале | AGENTS.md обновлен (журнал, хэши коммитов); overflow-защита; helper `insertRawTransaction`, триггер-тесты вынесены в отдельный файл; опечатка исправлена |
-| Безопасности | search_path в функции триггера разрешался по пути поиска; append-only допускает дописывание к чужой транзакции; смешение активов прямым SQL; переполнение `nextDelay`; контракт observer по конкурентности | 00006: `public.entries` + `SET search_path`; два ограничения зафиксированы как принятые (прямой SQL вне модели угроз); overflow-защита; docstring observer дополнен (конкурентность, запрет паники). KI-ledger-05: 00005 остался без фиксации search_path (примененная миграция не изменяется) |
+| No-context | FR-1 and the code diverged in the interpretation of `MaxDelay < BaseDelay`; `nextDelay` overflow at extreme values; the attempt exhaustion test could be falsely green; the spec said 16 goroutines versus 24 in the code | FR-1 reformulated (the ceiling is clamped, the ceiling of 32); `nextDelay` overflow protection + a unit test; a deterministic exhaustion test through a held lock; the spec synchronized |
+| Architecture | AGENTS.md not updated (T-LED-01, T-LED-02, journal); the terminal conflict lost its cause; `MaxAttempts` was not capped above | AGENTS.md updated; `ErrConflict` wraps the last cause; the ceiling of 32 in normalization |
+| With-context | AGENTS.md not updated; `nextDelay` overflow; duplication of the SQL skeleton in tests; a typo in the spec; commit statuses of 2.1/2.2 in the journal | AGENTS.md updated (journal, commit hashes); overflow protection; the `insertRawTransaction` helper, trigger tests moved to a separate file; the typo fixed |
+| Security | search_path in the trigger function was resolved through the search path; append-only allows appending to a foreign transaction; asset mixing through direct SQL; `nextDelay` overflow; the observer concurrency contract | 00006: `public.entries` + `SET search_path`; two limitations recorded as accepted (direct SQL outside the threat model); overflow protection; the observer docstring extended (concurrency, panic prohibition). KI-ledger-05: 00005 was left without search_path pinning (an applied migration is not changed) |

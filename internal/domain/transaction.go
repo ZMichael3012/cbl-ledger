@@ -6,21 +6,21 @@ import (
 	"strings"
 )
 
-// MaxEntries задает предельное число проводок в одной транзакции.
+// MaxEntries sets the maximum number of entries in one transaction.
 const MaxEntries = 100
 
-// EntryInput описывает проводку во входе транзакции двойной записи.
+// EntryInput describes an entry in a double-entry transaction input.
 type EntryInput struct {
-	// AccountID задает счет проводки.
+	// AccountID sets the account of the entry.
 	AccountID string
-	// Direction задает направление проводки.
+	// Direction sets the direction of the entry.
 	Direction Direction
-	// Amount задает сумму в минимальных единицах актива.
+	// Amount sets the amount in minor units of the asset.
 	Amount int64
 }
 
-// ValidateEntries проверяет инварианты транзакции: минимум две проводки,
-// положительные суммы, корректные направления и равенство дебетов и кредитов.
+// ValidateEntries checks the transaction invariants: at least two entries,
+// positive amounts, valid directions and equal debits and credits.
 func ValidateEntries(entries []EntryInput) error {
 	if len(entries) < 2 {
 		return fmt.Errorf("%w: at least two entries required", ErrInvalidTransaction)

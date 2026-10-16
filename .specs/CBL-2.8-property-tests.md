@@ -1,156 +1,161 @@
-﻿# CBL-2.8. Property-based тесты инвариантов леджера
+﻿# CBL-2.8. Property-based tests of ledger invariants
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E2, Ledger |
-| Репозиторий | `cbl-ledger` |
-| Размер | M |
-| Волна и параллельная группа | W1-LEDGER |
-| Зависит от | 2.2, 2.4 (резервы), 2.7 (эмиссии outbox) |
-| Версия контрактов | не меняется |
-| Статус | done, ревью закрыто |
+| Epic | E2, Ledger |
+| Repository | `cbl-ledger` |
+| Size | M |
+| Wave and parallel group | W1-LEDGER |
+| Depends on | 2.2, 2.4 (reserves), 2.7 (outbox emissions) |
+| Contract version | unchanged |
+| Status | done, review closed |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Денежные инварианты платформы (`CBL-000`, раздел 8) сейчас проверяются примерами; задача
-2.8 добавляет property-based проверки: случайные входы и последовательности операций, на
-которых инварианты обязаны держаться всегда. Закрывает остаточный риск «примеры покрывают
-happy path, но не комбинации» перед заморозкой CF-2 и стартом сервисов-потребителей.
+The money invariants of the platform (`CBL-000`, section 8) are currently checked by
+examples; task 2.8 adds property-based checks: random inputs and operation sequences on
+which the invariants must always hold. It closes the residual risk "examples cover the
+happy path but not the combinations" before the CF-2 freeze and the start of consumer
+services.
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: property-тесты домена (`ValidateEntries`) и хранилища на реальном PostgreSQL
-(баланс = сумма проводок, глобальная сохранность суммы, идемпотентность повтора,
-атомарность отказа), детерминированные сиды.
-Out of scope: новые сервисные функции, изменения схемы, нагрузка (2.9), property-тесты
-других сервисов (появятся в их задачах), property-тесты consumer-пути (покрыт 2.7).
+In scope: property tests of the domain (`ValidateEntries`) and of storage on real
+PostgreSQL (balance = the sum of postings, global sum conservation, repeat idempotency,
+failure atomicity), deterministic seeds.
+Out of scope: new service features, schema changes, load (2.9), property tests of other
+services (they will appear in their tasks), property tests of the consumer path (covered
+by 2.7).
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. Доменные свойства `ValidateEntries` (unit, без Docker):
-- два генератора: гарантированно сбалансированные наборы (направление "принятие" обязано
-  исполняться: тест падает, если ни один вход не принят) и сырые входы с суммами любого
-  знака, невалидными направлениями и пустыми счетами (обязан быть хотя бы один отказ);
-- для любых случайных входов: валидация принимает набор тогда и только тогда, когда все
-  суммы положительны, направления корректны, счета непусты и сумма дебетов равна сумме
-  кредитов; независимый пересчет - `big.Int` и строковые значения направлений (не предикаты
-  домена);
-- принятый набор всегда сбалансирован (суммы пересчитываются независимо);
-- переполнение int64 при суммировании отклоняется;
-- границы числа проводок: `MaxEntries`, `MaxEntries-1` принимаются, `MaxEntries+2`
-  (следующая сбалансированная пара сверх предела) отклоняется.
+FR-1. Domain properties of `ValidateEntries` (unit, no Docker):
+- two generators: guaranteed balanced sets (the "acceptance" direction must be exercised:
+  the test fails if no input is accepted) and raw inputs with amounts of any sign, invalid
+  directions and empty accounts (there must be at least one rejection);
+- for any random inputs: validation accepts a set if and only if all amounts are positive,
+  the directions are correct, the accounts are non-empty and the sum of debits equals the
+  sum of credits; the independent recalculation uses `big.Int` and string direction values
+  (not domain predicates);
+- an accepted set is always balanced (the amounts are recalculated independently);
+- int64 overflow during summation is rejected;
+- posting count boundaries: `MaxEntries`, `MaxEntries-1` are accepted, `MaxEntries+2` (the
+  next balanced pair over the limit) is rejected.
 
-FR-2. Свойства хранилища (integration, реальный PostgreSQL): случайная последовательность
-операций (PostTransaction, Reserve, CommitReserve, ReleaseReserve) над набором счетов двух
-активов (USDT и BTC); после каждой операции проверяются инварианты:
-- по каждому счету: `available + reserved == initial + Σкредиты - Σдебеты` (проводки
-  считаются SQL-агрегатом по `entries`);
-- `reserved` счета равен сумме сумм его активных удержаний (`reserves.status='active'`):
-  ловит перенос средств release/commit в неверном направлении и незавершенные переходы;
-- целостность резервов: каждый `committed` ссылается на существующую проводку, захват
-  пишет ровно пару проводок;
-- глобально по каждому активу: `Σ(available + reserved)` сохраняется (каждая транзакция
-  сбалансирована, проводок "из воздуха" нет; смешивание активов отклоняется);
-- каждая транзакция в `entries` сбалансирована (дебеты равны кредитам);
-- `reserved >= 0` у всех счетов; отрицательный `available` только у транзитных счетов;
-- снимки `transaction_balances` соответствуют множеству пар (транзакция, счет) проводок
-  PostTransaction (`ref_type <> 'reserve'`) и отсутствуют у захватов резервов;
-- точные дельты строк: число транзакций, проводок, удержаний, операций, снимков и
-  outbox-конвертов равно ожидаемому по счетчикам успешных операций (ловит "пустые"
-  операции и лишние записи).
+FR-2. Storage properties (integration, real PostgreSQL): a random sequence of operations
+(PostTransaction, Reserve, CommitReserve, ReleaseReserve) on a set of accounts of two
+assets (USDT and BTC); after every operation the following invariants are checked:
+- per account: `available + reserved == initial + Σcredits - Σdebits` (postings are
+  counted by an SQL aggregate over `entries`);
+- the account `reserved` equals the sum of the amounts of its active holds
+  (`reserves.status='active'`): catches a release/commit transfer of funds in the wrong
+  direction and unfinished transitions;
+- reserve integrity: every `committed` references an existing posting, a capture writes
+  exactly a pair of postings;
+- globally per asset: `Σ(available + reserved)` is conserved (every transaction is
+  balanced, there are no postings "out of thin air"; asset mixing is rejected);
+- every transaction in `entries` is balanced (debits equal credits);
+- `reserved >= 0` for all accounts; a negative `available` only for transit accounts;
+- `transaction_balances` snapshots correspond to the set of (transaction, account) pairs of
+  PostTransaction postings (`ref_type <> 'reserve'`) and are absent for reserve captures;
+- exact row deltas: the number of transactions, postings, holds, operations, snapshots and
+  outbox envelopes equals the expected one per the success counters (catches "empty"
+  operations and extra records).
 
-FR-3. Атомарность отказа: детерминированные отказные кейсы не зависят от сида:
-дисбаланс, нехватка средств на проводке и на удержании (сумма = available + 1),
-смешивание активов, commit released и release committed, повтор ключа с другим телом;
-каждый класс обязан воспроизвестись (счетчики классов с ассертом), и ни одна отвергнутая
-операция не меняет инварианты и числа строк `transactions`/`entries`/`reserves`/
-`reserve_operations`/`transaction_balances`/`outbox` (репозиторий в тесте пишет конверты
-через sink в outbox - атомарность проверяется на реальных строках).
+FR-3. Failure atomicity: the deterministic failure cases do not depend on the seed:
+imbalance, insufficient funds on a posting and on a hold (amount = available + 1), asset
+mixing, commit released and release committed, a key repeat with a different body; every
+class must be reproduced (class counters with an assertion), and no rejected operation
+changes the invariants or the row counts of
+`transactions`/`entries`/`reserves`/`reserve_operations`/`transaction_balances`/`outbox`
+(in the test the repository writes envelopes to the outbox via a sink - atomicity is
+checked on real rows).
 
-FR-4. Идемпотентность: повтор успешных `PostTransaction` по тем же ключам (и телу) в конце
-сценария не меняет инварианты и счетчики; повтор ключа с другим телом отклоняется.
+FR-4. Idempotency: a repeat of successful `PostTransaction` calls with the same keys (and
+body) at the end of the scenario changes neither the invariants nor the counters; a key
+repeat with a different body is rejected.
 
-FR-5. Детерминированность: сид генератора фиксирован по умолчанию и переопределяется
-переменной `PROPERTY_SEED` (для локализации редких сбоев) на обоих уровнях; сид печатается
-в логе теста, номер стадии входит в сообщения ассертов. Метрика теста: не менее 30
-случайных операций, не менее 200 доменных случаев на генератор и обязательные счетчики
-классов отказов.
+FR-5. Determinism: the generator seed is fixed by default and overridden by the
+`PROPERTY_SEED` variable (for localizing rare failures) at both levels; the seed is printed
+to the test log, and the stage number is included in assertion messages. Test metric: at
+least 30 random operations, at least 200 domain cases per generator and mandatory failure
+class counters.
 
-## 4. Контракты
+## 4. Contracts
 
-Контракты не меняются. Свойства формулируются над существующими RPC-эквивалентами
-хранилища и не зависят от формата событий.
+The contracts do not change. The properties are formulated over the existing storage RPC
+equivalents and do not depend on the event format.
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
-Схема не меняется (миграции 00001 - 00008). Проверки опираются на SQL-агрегаты по
-`entries`, `balances`, `transactions`, `transaction_balances`.
+The schema does not change (migrations 00001 - 00008). The checks rely on SQL aggregates
+over `entries`, `balances`, `transactions`, `transaction_balances`.
 
-## 6. Конечные автоматы
+## 6. Finite state machines
 
-Случайные последовательности включают переходы резервов только через валидные состояния;
-невалидные переходы (commit released, release committed) проверяются как свойства отказа
-в FR-3.
+Random sequences include reserve transitions only through valid states; invalid transitions
+(commit released, release committed) are checked as failure properties in FR-3.
 
 ## 7. Edge cases
 
-Нулевой доступный баланс, точное исчерпание `available` (сумма = available + 1),
-повтор ключа (то же и другое тело), встречные переходы резервов (commit released,
-release committed), счет с нулевыми проводками, длинные проводки (`MaxEntries`),
-проводка с повторяющимся счетом (снимок на счет, а не на проводку), суммы на границе
-int64, комиссионный и clearing-счет в общих операциях, смешивание активов, два актива
-(BTC/8 и USDT/2), os-переопределение сида.
+Zero available balance, exact exhaustion of `available` (amount = available + 1), a key
+repeat (the same and a different body), opposite reserve transitions (commit released,
+release committed), an account with zero postings, long postings (`MaxEntries`), a posting
+with a repeated account (a snapshot per account, not per posting), amounts on the int64
+boundary, fee and clearing accounts in common operations, asset mixing, two assets (BTC/8
+and USDT/2), os seed override.
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-Интеграционный property-тест укладывается в 60 секунд на testcontainers PostgreSQL
-(сценарий 30 операций, инварианты проверяются агрегатными запросами); новых зависимостей
-нет (ADR-2.8). Покрытие unit+integration не ниже 80%; тесты детерминированы и не флакуют
-(фиксированные сиды, отсутствие таймингов; проверены сиды 1 - 8).
+The integration property test completes within 60 seconds on testcontainers PostgreSQL (a
+scenario of 30 operations, the invariants are checked by aggregate queries); there are no
+new dependencies (ADR-2.8). Unit+integration coverage is at least 80%; the tests are
+deterministic and do not flake (fixed seeds, no timing; seeds 1 - 8 verified).
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
-| Unit | `internal/domain`: 400 случайных наборов (сбалансированный и сырой генераторы), границы `MaxEntries`/`MaxEntries-1`/сверх предела, переполнение; ассерты живого принятия и живых отказов |
-| Integration (storage) | `internal/storage`: 30 случайных операций с проверкой инвариантов FR-2 после каждой; детерминированные отказы FR-3 (NSF, дисбаланс, активы, встречные переходы, reuse) с проверкой неизменности строк (включая outbox); replay; точные дельты строк; сид |
-| E2E / Smoke | не требуется: свойства проверяются на слое хранилища; e2e 2.4/2.5/2.7 остаются |
-| Load | не расширяется |
+| Unit | `internal/domain`: 400 random sets (the balanced and the raw generator), the boundaries `MaxEntries`/`MaxEntries-1`/over the limit, overflow; live acceptance and live rejection assertions |
+| Integration (storage) | `internal/storage`: 30 random operations with the FR-2 invariants checked after each; the deterministic FR-3 failures (NSF, imbalance, assets, opposite transitions, reuse) with a row-immutability check (including the outbox); replay; exact row deltas; the seed |
+| E2E / Smoke | not required: the properties are checked at the storage layer; the 2.4/2.5/2.7 e2e runs remain |
+| Load | not extended |
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-Коммит `CBL-2.8: property-based тесты инвариантов леджера`; спека входит в коммит;
-AGENTS (команды, trade-off T-LED-10, журнал) и `CBL-004` обновляются.
+Commit `CBL-2.8: property-based tests of ledger invariants`; the spec is part of the
+commit; AGENTS (commands, trade-off T-LED-10, the journal) and `CBL-004` are updated.
 
-## 11. Открытые вопросы и решения
+## 11. Open questions and decisions
 
-- ADR-2.8: property-тестирование без новых зависимостей: домен - стандартный
-  `testing/quick` (два генератора: сбалансированный и сырой); хранилище - детерминированный
-  генератор на `math/rand/v2` с сидом. Альтернатива `pgregory.net/rapid` отклонена из-за
-  новой зависимости ради эффекта, достижимого стандартными средствами (T-LED-10).
-  Цена решения: ручной генератор сценария, отсутствие шринкинга, инварианты дублируют знание
-  SQL-схемы; локализация сбоя - по стадии в сообщении и сиду (`PROPERTY_SEED`,
-  перезапуск с тем же сидом воспроизводит сценарий; журнал операций не печатается).
-- ADR: инварианты проверяются SQL-агрегатами (независимый пересчет), а не повторным
-  использованием проверяемого кода; независимость подтверждена мутационной проверкой:
-  подмена направления release ловится инвариантом `reserved = Σ активных удержаний`,
-  удаление снимков - соответствием снимков, обход идемпотентности - счетчиками replay.
-- Принято с ограничением: значения снимков `transaction_balances` проверяются примерами
-  задачи 2.5 (повтор возвращает исходный снимок); property-набор проверяет их наличие и
-  соответствие парам (транзакция, счет).
-- Открытый вопрос: property-тесты consumer-пути (payment.events) могут быть добавлены
-  в 4.x при появлении автомата состояний платежа.
+- ADR-2.8: property testing without new dependencies: the domain uses the standard
+  `testing/quick` (two generators: balanced and raw); storage uses a deterministic
+  generator on `math/rand/v2` with a seed. The `pgregory.net/rapid` alternative was
+  rejected because of a new dependency for an effect achievable with standard means
+  (T-LED-10). The price of the decision: a manual scenario generator, no shrinking, the
+  invariants duplicate knowledge of the SQL schema; failure localization is by the stage in
+  the message and the seed (`PROPERTY_SEED`, a restart with the same seed reproduces the
+  scenario; the operation journal is not printed).
+- ADR: the invariants are checked by SQL aggregates (independent recalculation), not by
+  reusing the code under test; independence is confirmed by a mutation check: swapping the
+  release direction is caught by the invariant `reserved = Σ active holds`, snapshot
+  removal by the snapshot correspondence, an idempotency bypass by the replay counters.
+- Accepted with a limitation: the values of `transaction_balances` snapshots are checked by
+  the examples of task 2.5 (a repeat returns the original snapshot); the property suite
+  checks their presence and correspondence to (transaction, account) pairs.
+- Open question: property tests of the consumer path (payment.events) may be added in 4.x
+  when the payment state machine appears.
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (14.10.2026). Блокеры: слепота инвариантов к семантике резервов
-(направление release и статусы), вакуумный FR-3 и непроверяемая атомарность outbox -
-закрыты усилением набора; подтверждено мутациями (подмена направления release падает на
-инварианте активных удержаний).
+Four independent passes (14.10.2026). Blockers: the invariants' blindness to reserve
+semantics (the release direction and statuses), the vacuous FR-3 and the unverifiable
+outbox atomicity - closed by strengthening the suite; confirmed by mutations (swapping the
+release direction fails on the active-holds invariant).
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | NSF и встречные переходы резервов не воспроизводятся при дефолтном сиде; outbox вне счетчиков; направление "принятие" в домене мертво (`accepted=0`); PROPERTY_SEED только в storage; снимки-пары неотличимы | NSF/дисбаланс/активы/встречные переходы детерминированы + классовые ассерты; outbox и reserve_operations в счетчиках (реальный sink); два генератора с ассертами живого принятия/отказов; PROPERTY_SEED на обоих уровнях; проводка с повторяющимся счетом (снимок на счет) |
-| Архитектуры | outbox-атомарность заявлена и непроверяема; встречные переходы мертвы; ADR не описывает цену; генератор не опровергает часть FR-1; снимки привязаны к ref_type='property'; один актив; нет liveness-проверок | реальный sink + счетчики; детерминированные переходы; ADR дополнен ценой; сырой генератор (направления/пустые счета); предикат `ref_type <> 'reserve'`; второй актив BTC/8 с группировкой по активу; точные дельты строк по счетчикам успехов |
-| С контекстом | FR-3 частично вакуумен; outbox вне счетчиков; replay-блок условный; PROPERTY_SEED не в домене; дублирование примеров | те же закрытия; `require.NotEmpty(replays)` и требование состава сценария; сид и стадии; дублирование зафиксировано как границы-тесты (переполнение, MaxEntries) |
-| Безопасности | BLOCKER: инварианты слепы к направлению резервов и статусам (release-мутация и commit без финализации проходят); BLOCKER: FR-3 вакуумен (мутация "убрать проверку NSF" проходит); BLOCKER: outbox не проверяется; нет смешивания активов; снимки-значения | инвариант `reserved = Σ активных удержаний` + целостность committed (ловит обе мутации, проверено подменой release); детерминированные NSF/состояния с счетчиками классов; реальный sink и atomicity-счетчики; BTC/8 и отклонение смешанной проводки; значения снимков - зона 2.5 (зафиксировано) |
+| No context | NSF and opposite reserve transitions are not reproduced with the default seed; the outbox is outside the counters; the "acceptance" direction in the domain is dead (`accepted=0`); PROPERTY_SEED only in storage; snapshot pairs are indistinguishable | NSF/imbalance/assets/opposite transitions are deterministic + class assertions; the outbox and reserve_operations in the counters (a real sink); two generators with live acceptance/rejection assertions; PROPERTY_SEED at both levels; a posting with a repeated account (a snapshot per account) |
+| Architecture | outbox atomicity is claimed and unverifiable; opposite transitions are dead; the ADR does not describe the price; the generator does not falsify part of FR-1; snapshots are tied to ref_type='property'; one asset; no liveness checks | a real sink + counters; deterministic transitions; the ADR extended with the price; the raw generator (directions/empty accounts); the `ref_type <> 'reserve'` predicate; a second asset BTC/8 with per-asset grouping; exact row deltas per success counters |
+| With context | FR-3 is partially vacuous; the outbox is outside the counters; the replay block is conditional; PROPERTY_SEED is not in the domain; duplication of examples | the same closures; `require.NotEmpty(replays)` and a scenario-composition requirement; the seed and stages; the duplication recorded as boundary tests (overflow, MaxEntries) |
+| Security | BLOCKER: the invariants are blind to the reserve direction and statuses (a release mutation and a commit without finalization pass); BLOCKER: FR-3 is vacuous (the "remove the NSF check" mutation passes); BLOCKER: the outbox is not checked; no asset mixing; snapshot values | the invariant `reserved = Σ active holds` + committed integrity (catches both mutations, verified by swapping release); deterministic NSF/states with class counters; a real sink and atomicity counters; BTC/8 and rejection of a mixed posting; snapshot values are the 2.5 area (recorded) |

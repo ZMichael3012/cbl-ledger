@@ -1,120 +1,120 @@
-# CBL-2.1. Схема БД леджера
+# CBL-2.1. Ledger DB schema
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E2, Ledger |
-| Репозиторий | `cbl-ledger` |
-| Размер | M |
-| Волна и параллельная группа | W1-LEDGER |
-| Зависит от | 1.2, 1.3 (пакеты cbl-kit), CF-1 |
-| Версия контрактов | `cbl-protos@cf-1` (`billing/ledger/v1`, `billing/events/v1`) |
-| Статус | done (локально, ожидает коммита) |
+| Epic | E2, Ledger |
+| Repository | `cbl-ledger` |
+| Size | M |
+| Wave and parallel group | W1-LEDGER |
+| Depends on | 1.2, 1.3 (cbl-kit packages), CF-1 |
+| Contract version | `cbl-protos@cf-1` (`billing/ledger/v1`, `billing/events/v1`) |
+| Status | done (locally, awaiting commit) |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Схема леджера - фундамент задач 2.2 - 2.9 и всех денежных потоков платформы (`CBL-000`,
-инварианты 2 - 5). Двойная запись, append-only проводки, оптимистичные блокировки балансов.
+The ledger schema is the foundation of tasks 2.2 - 2.9 and of all money flows of the platform
+(`CBL-000`, invariants 2 - 5). Double entry, append-only entries, optimistic balance locking.
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: goose-миграции, GORM-модели, константы направлений и типов счетов, reference-копии
-outbox/inbox из `cbl-kit`.
-Out of scope: логика `PostTransaction` (2.2), резервы (2.4), consumer платежей (2.7).
+In scope: goose migrations, GORM models, direction and account type constants, reference copies
+of outbox/inbox from `cbl-kit`.
+Out of scope: `PostTransaction` logic (2.2), reserves (2.4), payment consumer (2.7).
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. Миграции только вперед, goose-формат (`-- +goose Up` / `-- +goose Down`):
+FR-1. Migrations are forward only, goose format (`-- +goose Up` / `-- +goose Down`):
 
-| Файл | Содержимое |
+| File | Content |
 | :-- | :-- |
-| `migrations/00001_ledger_init.sql` | `accounts`, `transactions`, `entries`, `balances`, триггер append-only |
-| `migrations/00002_outbox.sql` | копия `cbl-kit/migrations/outbox.sql` |
-| `migrations/00003_inbox.sql` | копия `cbl-kit/migrations/inbox.sql` |
-| `migrations/00004_transaction_request_hash.sql` | колонка `request_hash` для контроля повтора ключа |
-| `migrations/00005_balances_non_negative.sql` | триггер запрета отрицательного `available` для merchant и payout |
+| `migrations/00001_ledger_init.sql` | `accounts`, `transactions`, `entries`, `balances`, append-only trigger |
+| `migrations/00002_outbox.sql` | a copy of `cbl-kit/migrations/outbox.sql` |
+| `migrations/00003_inbox.sql` | a copy of `cbl-kit/migrations/inbox.sql` |
+| `migrations/00004_transaction_request_hash.sql` | `request_hash` column for key reuse control |
+| `migrations/00005_balances_non_negative.sql` | trigger forbidding a negative `available` for merchant and payout |
 
 FR-2. `accounts`: `id uuid PRIMARY KEY`, `type text NOT NULL` (merchant, clearing, fee, payout,
 suspense), `asset text NOT NULL`, `decimals int NOT NULL CHECK (decimals BETWEEN 0 AND 18)`,
-`merchant_ref text NULL`, `created_at timestamptz NOT NULL DEFAULT now()`; уникальный индекс
-`(type, asset, COALESCE(merchant_ref, ''))`: счета без merchant_ref тоже уникальны в рамках
-типа и актива.
+`merchant_ref text NULL`, `created_at timestamptz NOT NULL DEFAULT now()`; a unique index
+`(type, asset, COALESCE(merchant_ref, ''))`: accounts without merchant_ref are also unique within
+a type and asset.
 
 FR-3. `transactions`: `id uuid PRIMARY KEY`, `idempotency_key text NOT NULL UNIQUE`,
-`ref_type text NOT NULL`, `ref_id text NOT NULL`, `request_hash text NOT NULL` (канонический
-хэш тела, миграция 00004), `created_at timestamptz NOT NULL DEFAULT now()`.
+`ref_type text NOT NULL`, `ref_id text NOT NULL`, `request_hash text NOT NULL` (canonical
+body hash, migration 00004), `created_at timestamptz NOT NULL DEFAULT now()`.
 
-FR-4. `entries` (append-only, без UPDATE и DELETE):
+FR-4. `entries` (append-only, without UPDATE and DELETE):
 `id bigserial PRIMARY KEY`, `transaction_id uuid NOT NULL REFERENCES transactions(id)`,
 `account_id uuid NOT NULL REFERENCES accounts(id)`, `direction text NOT NULL CHECK (direction IN
 ('debit','credit'))`, `amount bigint NOT NULL CHECK (amount > 0)`, `created_at timestamptz NOT
-NULL DEFAULT now()`; индексы `(account_id, created_at, id)` и `(transaction_id)`.
-Триггер `entries_append_only` поднимает исключение на UPDATE и DELETE.
+NULL DEFAULT now()`; indexes `(account_id, created_at, id)` and `(transaction_id)`.
+The `entries_append_only` trigger raises an exception on UPDATE and DELETE.
 
 FR-5. `balances`: `account_id uuid PRIMARY KEY REFERENCES accounts(id)`,
 `available bigint NOT NULL DEFAULT 0`, `reserved bigint NOT NULL DEFAULT 0 CHECK (reserved >= 0)`,
 `lock_version bigint NOT NULL DEFAULT 0`, `updated_at timestamptz NOT NULL DEFAULT now()`;
-обновления только через оптимистичную блокировку по `lock_version` (2.3). Отрицательный
-`available` запрещен триггером `balances_non_negative` для счетов merchant и payout
-(миграция 00005); транзитные счета (clearing, fee, suspense) могут уходить в минус (T-LED-03).
+updates only through an optimistic lock on `lock_version` (2.3). A negative
+`available` is forbidden by the `balances_non_negative` trigger for merchant and payout
+accounts (migration 00005); transit accounts (clearing, fee, suspense) may go negative (T-LED-03).
 
-FR-6. GORM-модели повторяют DDL; `AutoMigrate` запрещен. Денежные поля только int64.
-Доменные константы типов счетов и направлений экспортируются из `internal/domain`.
+FR-6. GORM models mirror the DDL; `AutoMigrate` is forbidden. Money fields are int64 only.
+Domain constants of account types and directions are exported from `internal/domain`.
 
-FR-7. Локальные зависимости: `go.mod` сервиса подключает `github.com/cbl/cbl-kit` и
-`github.com/cbl/cbl-protos` через временные `replace`-директивы на сопоставленные каталоги
-`../cbl-kit` и `../cbl-protos`; replace снимается после публикации модулей в CI (0.2).
+FR-7. Local dependencies: the service `go.mod` wires `github.com/cbl/cbl-kit` and
+`github.com/cbl/cbl-protos` through temporary `replace` directives pointing to the sibling
+directories `../cbl-kit` and `../cbl-protos`; the replace is removed after the modules are
+published in CI (0.2).
 
-## 4. Контракты
+## 4. Contracts
 
-Таблица соответствия GORM-моделей контракту `billing/ledger/v1`:
-`EntryInput/Entry` <- `entries`, `AccountBalance` <- `balances`, `Direction` enum <- колонка
-`direction`. События `ledger.events` строятся из `transactions` и `entries` (задачи 2.2, 2.7).
+The table mapping GORM models to the `billing/ledger/v1` contract:
+`EntryInput/Entry` <- `entries`, `AccountBalance` <- `balances`, `Direction` enum <- the
+`direction` column. `ledger.events` events are built from `transactions` and `entries` (tasks 2.2, 2.7).
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
-См. FR-2 - FR-5. Все суммы в минимальных единицах актива, asset и decimals берутся из account.
+See FR-2 - FR-5. All amounts are in asset minor units; asset and decimals are taken from the account.
 
-## 6. Конечные автоматы
+## 6. State machines
 
-Не применимо; состояния платежей и выплат живут в своих сервисах.
+Not applicable; payment and payout states live in their own services.
 
 ## 7. Edge cases
 
-Проверка сбалансированности на уровне приложения (2.2), запрет UPDATE/DELETE через триггер,
-конкурентные апдейты баланса (2.3), пустые entries, отрицательные суммы, несуществующий account.
+Entry balance check at the application level (2.2), UPDATE/DELETE prohibition via the trigger,
+concurrent balance updates (2.3), empty entries, negative amounts, a nonexistent account.
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-Применение миграций идемпотентно повторно (goose versioning). Индексы под горячие запросы
-баланса и выписки. Проверка схемы на реальном PostgreSQL.
+Migration application is idempotently repeatable (goose versioning). Indexes for hot balance
+and statement queries. Schema verification on real PostgreSQL.
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
-| Smoke | `go build ./...`, миграции применяются на чистой базе |
-| Unit | константы и валидаторы моделей |
-| Integration | testcontainers PostgreSQL: миграции вверх; триггер блокирует UPDATE/DELETE entries; CHECK reserved >= 0; UNIQUE idempotency_key; FK на несуществующий account |
-| E2E | локальный compose леджера: health + применение миграций |
-| Load | не применимо (2.9) |
+| Smoke | `go build ./...`, migrations apply on a clean database |
+| Unit | model constants and validators |
+| Integration | testcontainers PostgreSQL: migrations up; the trigger blocks UPDATE/DELETE on entries; CHECK reserved >= 0; UNIQUE idempotency_key; FK to a nonexistent account |
+| E2E | local ledger compose: health + migration application |
+| Load | not applicable (2.9) |
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-Коммит `CBL-2.1: схема леджера с append-only entries и балансами`; спека в том же коммите.
+Commit `CBL-2.1: ledger schema with append-only entries and balances`; the spec is in the same commit.
 
-## 11. Открытые вопросы
+## 11. Open questions
 
-- Партиционирование `entries` по времени - отложено до бенчмарка 2.9.
+- Time-based partitioning of `entries` is postponed until benchmark 2.9.
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (13 - 14.10.2026): без контекста, архитектуры, с контекстом,
-безопасности (блокирующий).
+Four independent passes (13 - 14.10.2026): no-context, architecture, with-context,
+security (blocking).
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | уникальный индекс `accounts` строже FR-2; не покрыты `CHECK reserved >= 0` и FK-ограничения | FR-2 уточнена (COALESCE), тесты `reserved`/FK добавлены |
-| Архитектуры | нет второго барьера БД для балансов; контроль суммы проводок только в коде | миграция 00005 (триггер non-negative для merchant/payout); constraint trigger суммы - кандидат в 2.3 (T-LED-02) |
-| С контекстом | дублирование helper-обвязки между сервисами | `storagex.Migrate` вынесен в cbl-kit (T-KK6) |
-| Безопасности | отрицательный `available` не запрещен на уровне БД | закрыто миграцией 00005 и тестом `TestIntegrationBalancesNonNegativeTrigger` |
-
+| No-context | the unique index of `accounts` is stricter than FR-2; `CHECK reserved >= 0` and FK constraints are not covered | FR-2 clarified (COALESCE), `reserved`/FK tests added |
+| Architecture | there is no second DB barrier for balances; the sum of entries is controlled only in code | migration 00005 (a non-negative trigger for merchant/payout); the sum constraint trigger is a candidate for 2.3 (T-LED-02) |
+| With-context | duplication of helper wiring between services | `storagex.Migrate` moved to cbl-kit (T-KK6) |
+| Security | a negative `available` is not forbidden at the DB level | closed by migration 00005 and the `TestIntegrationBalancesNonNegativeTrigger` test |

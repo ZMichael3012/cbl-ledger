@@ -1,9 +1,9 @@
 //go:build e2e
 
-// Пакет e2e содержит сквозные сценарии леджера на compose-стенде (KI-ledger-03):
-// Reserve -> Commit / Release и PostTransaction -> GetBalance -> ListEntries
-// через реальный gRPC и PostgreSQL.
-// Запуск: powershell -NoProfile -File test/e2e/reserve_flow.ps1
+// Package e2e contains end-to-end ledger scenarios on the compose stand (KI-ledger-03):
+// Reserve -> Commit / Release and PostTransaction -> GetBalance -> ListEntries
+// via real gRPC and PostgreSQL.
+// Run instruction: test/e2e/E2E.md
 package e2e
 
 import (
@@ -32,7 +32,7 @@ import (
 	"github.com/cbl/cbl-ledger/internal/storage"
 )
 
-// envOr возвращает значение переменной окружения или значение по умолчанию.
+// envOr returns the environment variable value or the fallback value.
 func envOr(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
@@ -40,16 +40,16 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 
-// openLedgerDB подключается к PostgreSQL compose-стенда.
+// openLedgerDB connects to the PostgreSQL of the compose stand.
 func openLedgerDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := envOr("LEDGER_PG_DSN", "postgres://cbl:cbl@localhost:5432/ledger?sslmode=disable")
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
-	require.NoError(t, err, "compose-стенд ledger должен быть запущен (make up)")
+	require.NoError(t, err, "the ledger compose stand must be running (make up)")
 	return db
 }
 
-// openLedgerClient подключается к gRPC compose-стенда.
+// openLedgerClient connects to the gRPC of the compose stand.
 func openLedgerClient(t *testing.T) ledgerv1.LedgerServiceClient {
 	t.Helper()
 	address := envOr("LEDGER_GRPC_ADDR", "localhost:9040")
@@ -59,9 +59,8 @@ func openLedgerClient(t *testing.T) ledgerv1.LedgerServiceClient {
 	return ledgerv1.NewLedgerServiceClient(conn)
 }
 
-// seedE2EAccount провижинит счет плана счетов через сервисное хранилище (ADR-2.6):
-// ensureE2EAccount провижинит счет плана счетов штатным путем (ADR-2.6):
-// SQL-сев счетов заменен, идентификатор выводится детерминированно.
+// ensureE2EAccount provisions an account plan account via the service storage on the standard path (ADR-2.6):
+// the SQL seeding of accounts is replaced, the identifier is derived deterministically.
 func ensureE2EAccount(t *testing.T, db *gorm.DB, key domain.AccountKey) storage.Account {
 	t.Helper()
 	repo := storage.NewRepository(db, zap.NewNop())
@@ -70,8 +69,8 @@ func ensureE2EAccount(t *testing.T, db *gorm.DB, key domain.AccountKey) storage.
 	return account
 }
 
-// fundE2EAccount пополняет счет реальной проводкой Dr clearing / Cr account
-// (транзитный clearing может уходить в минус, T-LED-03); SQL-фондирование не нужно.
+// fundE2EAccount funds the account with a real entry Dr clearing / Cr account
+// (the transit clearing may go negative, T-LED-03); SQL funding is not needed.
 func fundE2EAccount(t *testing.T, db *gorm.DB, client ledgerv1.LedgerServiceClient, accountID string, amount int64) {
 	t.Helper()
 	clearing := ensureE2EAccount(t, db, domain.PlatformAccountKey(domain.AccountTypeClearing, "USDT", 2))
@@ -85,10 +84,10 @@ func fundE2EAccount(t *testing.T, db *gorm.DB, client ledgerv1.LedgerServiceClie
 			{AccountId: accountID, Direction: commonv1.Direction_DIRECTION_CREDIT, Amount: money(amount)},
 		},
 	})
-	require.NoError(t, err, "пополнение счета через проводку")
+	require.NoError(t, err, "account funding via an entry")
 }
 
-// money собирает сумму актива сценария.
+// money builds the scenario asset amount.
 func money(units int64) *commonv1.Money {
 	return &commonv1.Money{MinorUnits: units, Asset: "USDT", Decimals: 2}
 }
@@ -103,11 +102,11 @@ func TestReserveCommitAndReleaseFlow(t *testing.T) {
 	merchant := ensureE2EAccount(t, db, domain.MerchantAccountKey(merchantRef, "USDT", 2))
 	derived, err := domain.DeriveAccountID(domain.MerchantAccountKey(merchantRef, "USDT", 2))
 	require.NoError(t, err)
-	assert.Equal(t, derived.String(), merchant.ID, "id мерчантского счета выведен по плану счетов")
+	assert.Equal(t, derived.String(), merchant.ID, "the merchant account id is derived by the account plan")
 	fundE2EAccount(t, db, client, merchant.ID, 100_000)
 	refID := "payout-" + uuid.Must(uuid.NewV7()).String()
 
-	// Удержание: available -> reserved.
+	// Hold: available -> reserved.
 	reserved, err := client.Reserve(ctx, &ledgerv1.ReserveRequest{
 		IdempotencyKey: refID + ":reserve",
 		AccountId:      merchant.ID,
@@ -125,14 +124,14 @@ func TestReserveCommitAndReleaseFlow(t *testing.T) {
 		RefId:          refID,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, reserved.GetReserveId(), replay.GetReserveId(), "повтор ключа идемпотентен")
+	assert.Equal(t, reserved.GetReserveId(), replay.GetReserveId(), "a repeated key is idempotent")
 
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)
 	assert.Equal(t, int64(60_000), balance.Available)
 	assert.Equal(t, int64(40_000), balance.Reserved)
 
-	// Захват: проводка Dr merchant / Cr payout, удержание снято.
+	// Capture: entry Dr merchant / Cr payout, the hold is removed.
 	committed, err := client.CommitReserve(ctx, &ledgerv1.CommitReserveRequest{
 		IdempotencyKey: refID + ":commit",
 		ReserveId:      reserved.GetReserveId(),
@@ -157,9 +156,9 @@ func TestReserveCommitAndReleaseFlow(t *testing.T) {
 	var entries int64
 	require.NoError(t, db.Model(&storage.Entry{}).
 		Where("transaction_id = ?", *stored.TransactionID).Count(&entries).Error)
-	assert.Equal(t, int64(2), entries, "захват создает сбалансированную пару проводок")
+	assert.Equal(t, int64(2), entries, "the capture creates a balanced pair of entries")
 
-	// Отмена второй выплаты: компенсация возвращает средства.
+	// Cancellation of the second payout: the compensation returns the funds.
 	cancelRef := "payout-" + uuid.Must(uuid.NewV7()).String()
 	second, err := client.Reserve(ctx, &ledgerv1.ReserveRequest{
 		IdempotencyKey: cancelRef + ":reserve",
@@ -180,12 +179,12 @@ func TestReserveCommitAndReleaseFlow(t *testing.T) {
 	assert.Equal(t, int64(60_000), balance.Available)
 	assert.Zero(t, balance.Reserved)
 
-	// Захват освобожденного резерва отклоняется.
+	// Capturing a released reserve is rejected.
 	_, err = client.CommitReserve(ctx, &ledgerv1.CommitReserveRequest{
 		IdempotencyKey: cancelRef + ":commit",
 		ReserveId:      second.GetReserveId(),
 	})
-	require.Error(t, err, "захват released резерва должен быть отклонен")
+	require.Error(t, err, "capturing a released reserve must be rejected")
 }
 
 func TestBalanceAndEntriesFlow(t *testing.T) {
@@ -217,7 +216,7 @@ func TestBalanceAndEntriesFlow(t *testing.T) {
 	assert.Equal(t, int64(40_000), balance.GetBalance().GetAvailable().GetMinorUnits())
 	assert.Equal(t, "USDT", balance.GetBalance().GetAvailable().GetAsset())
 
-	// Вторая проводка меняет текущий баланс; повтор первой обязан вернуть снимок.
+	// The second entry changes the current balance; the retry of the first must return the snapshot.
 	secondRef := "pay-" + uuid.Must(uuid.NewV7()).String()
 	_, err = client.PostTransaction(ctx, &ledgerv1.PostTransactionRequest{
 		IdempotencyKey: secondRef + ":completed",
@@ -243,11 +242,11 @@ func TestBalanceAndEntriesFlow(t *testing.T) {
 	for _, snapshot := range replay.GetBalancesAfter() {
 		if snapshot.GetAccountId() == merchant.ID {
 			assert.Equal(t, int64(40_000), snapshot.GetAvailable().GetMinorUnits(),
-				"повтор возвращает снимок balances_after")
+				"the retry returns the balances_after snapshot")
 		}
 	}
 
-	// Выписка: пополнение и две проводки, курсорная пагинация по две записи.
+	// Statement: funding and two entries, cursor pagination two records per page.
 	var listed []*ledgerv1.Entry
 	cursor := ""
 	for {
@@ -263,7 +262,7 @@ func TestBalanceAndEntriesFlow(t *testing.T) {
 			break
 		}
 	}
-	require.Len(t, listed, 3, "пополнение и две оплаты")
+	require.Len(t, listed, 3, "funding and two payments")
 	assert.Equal(t, "funding", listed[0].GetRefType())
 	assert.Equal(t, commonv1.Direction_DIRECTION_CREDIT, listed[0].GetDirection())
 	assert.Equal(t, int64(50_000), listed[0].GetAmount().GetMinorUnits())
@@ -272,10 +271,10 @@ func TestBalanceAndEntriesFlow(t *testing.T) {
 	assert.Greater(t, listed[1].GetEntryId(), listed[0].GetEntryId())
 	assert.Equal(t, "payment", listed[2].GetRefType())
 
-	// 2.10: мерчантская выписка и список счетов с балансами (предпосылка 7.4).
+	// 2.10: merchant statement and account list with balances (prerequisite 7.4).
 	scoped, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{MerchantRef: merchantRef})
 	require.NoError(t, err)
-	require.Len(t, scoped.GetEntries(), 3, "выписка мерчанта совпадает со счетной")
+	require.Len(t, scoped.GetEntries(), 3, "the merchant statement matches the account one")
 	for _, listedEntry := range scoped.GetEntries() {
 		assert.Equal(t, merchant.ID, listedEntry.GetAccountId())
 	}
@@ -289,9 +288,9 @@ func TestBalanceAndEntriesFlow(t *testing.T) {
 	distant := timestamppb.New(time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC))
 	empty, err := client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{MerchantRef: merchantRef, PeriodFrom: distant})
 	require.NoError(t, err)
-	assert.Empty(t, empty.GetEntries(), "за пределами периода проводок нет")
+	assert.Empty(t, empty.GetEntries(), "there are no entries outside the period")
 
-	// Чужой merchant_ref со счетом этого мерчанта отвечает NotFound.
+	// A foreign merchant_ref with this merchant account responds NotFound.
 	_, err = client.ListEntries(ctx, &ledgerv1.ListEntriesRequest{
 		MerchantRef: "e2e-" + uuid.Must(uuid.NewV7()).String(),
 		AccountId:   merchant.ID,

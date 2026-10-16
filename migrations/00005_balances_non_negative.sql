@@ -1,7 +1,7 @@
 -- +goose Up
--- Второй барьер денежного инварианта: баланс счетов merchant и payout
--- не может стать отрицательным даже при ошибке приложения.
--- Транзитные счета (clearing, fee, suspense) могут уходить в минус.
+-- The second barrier of the money invariant: the balance of merchant and payout
+-- accounts cannot become negative even on an application error.
+-- Transit accounts (clearing, fee, suspense) may go negative.
 -- +goose StatementBegin
 CREATE FUNCTION balances_non_negative() RETURNS trigger AS $$
 DECLARE account_type text;

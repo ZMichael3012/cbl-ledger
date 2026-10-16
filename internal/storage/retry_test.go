@@ -23,7 +23,7 @@ func TestDefaultRetryPolicy(t *testing.T) {
 func TestNormalizeRetryPolicy(t *testing.T) {
 	defaults := DefaultRetryPolicy()
 
-	assert.Equal(t, defaults, normalizeRetryPolicy(RetryPolicy{}), "нулевая политика заменяется значениями по умолчанию")
+	assert.Equal(t, defaults, normalizeRetryPolicy(RetryPolicy{}), "a zero policy is replaced with the default values")
 
 	partial := normalizeRetryPolicy(RetryPolicy{MaxAttempts: -3, BaseDelay: -time.Second})
 	assert.Equal(t, defaults.MaxAttempts, partial.MaxAttempts)
@@ -33,13 +33,13 @@ func TestNormalizeRetryPolicy(t *testing.T) {
 	capped := normalizeRetryPolicy(RetryPolicy{MaxAttempts: 4, BaseDelay: time.Second, MaxDelay: time.Millisecond})
 	assert.Equal(t, 4, capped.MaxAttempts)
 	assert.Equal(t, time.Second, capped.BaseDelay)
-	assert.Equal(t, time.Second, capped.MaxDelay, "потолок не может быть ниже базовой паузы")
+	assert.Equal(t, time.Second, capped.MaxDelay, "the ceiling cannot be below the base delay")
 
 	custom := RetryPolicy{MaxAttempts: 3, BaseDelay: 2 * time.Millisecond, MaxDelay: 20 * time.Millisecond}
-	assert.Equal(t, custom, normalizeRetryPolicy(custom), "валидная политика не меняется")
+	assert.Equal(t, custom, normalizeRetryPolicy(custom), "a valid policy is not changed")
 
 	ceiling := normalizeRetryPolicy(RetryPolicy{MaxAttempts: 1000})
-	assert.Equal(t, maxRetryAttemptsCeiling, ceiling.MaxAttempts, "число попыток ограничено сверху")
+	assert.Equal(t, maxRetryAttemptsCeiling, ceiling.MaxAttempts, "the number of attempts is capped")
 }
 
 func TestNextDelayBounds(t *testing.T) {
@@ -48,19 +48,19 @@ func TestNextDelayBounds(t *testing.T) {
 	var gotArg int64
 	delay := policy.nextDelay(0, func(n int64) int64 { gotArg = n; return n - 1 })
 	assert.Equal(t, policy.BaseDelay, delay)
-	assert.Equal(t, int64(policy.BaseDelay)+1, gotArg, "диапазон аргумента равен задержке плюс один")
+	assert.Equal(t, int64(policy.BaseDelay)+1, gotArg, "the argument range equals the delay plus one")
 
 	delay = policy.nextDelay(1, func(n int64) int64 { return n - 1 })
 	assert.Equal(t, 2*policy.BaseDelay, delay)
 
 	delay = policy.nextDelay(6, func(n int64) int64 { return n - 1 })
-	assert.Equal(t, policy.MaxDelay, delay, "потолок ограничивает задержку")
+	assert.Equal(t, policy.MaxDelay, delay, "the ceiling limits the delay")
 
 	delay = policy.nextDelay(30, func(n int64) int64 { return n - 1 })
-	assert.Equal(t, policy.MaxDelay, delay, "большие номера попыток не переполняют задержку")
+	assert.Equal(t, policy.MaxDelay, delay, "large attempt numbers do not overflow the delay")
 
 	zero := policy.nextDelay(3, func(int64) int64 { return 0 })
-	assert.Zero(t, zero, "полный jitter допускает нулевую паузу")
+	assert.Zero(t, zero, "full jitter allows a zero pause")
 }
 
 func TestNextDelayExtremeMaxDelayNoPanic(t *testing.T) {
@@ -69,7 +69,7 @@ func TestNextDelayExtremeMaxDelayNoPanic(t *testing.T) {
 	var gotArg int64
 	delay := policy.nextDelay(62, func(n int64) int64 { gotArg = n; return n - 1 })
 	assert.Equal(t, time.Duration(math.MaxInt64-1), delay)
-	assert.Equal(t, int64(math.MaxInt64), gotArg, "граница не переполняется добавлением единицы")
+	assert.Equal(t, int64(math.MaxInt64), gotArg, "the boundary does not overflow by adding one")
 }
 
 func TestRetryCause(t *testing.T) {

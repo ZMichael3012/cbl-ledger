@@ -1,173 +1,184 @@
-# CBL-2.7. Consumer payment.events и публикация ledger.events
+# CBL-2.7. payment.events consumer and ledger.events publication
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E2, Ledger |
-| Репозиторий | `cbl-ledger` |
-| Размер | M |
-| Волна и параллельная группа | W1-LEDGER |
-| Зависит от | 2.2, 2.4, 2.6, CF-1 |
-| Версия контрактов | `cbl-protos@cf-1` (`billing/events/v1`, без изменений proto) |
-| Статус | done, ревью закрыто |
+| Epic | E2, Ledger |
+| Repository | `cbl-ledger` |
+| Size | M |
+| Wave and parallel group | W1-LEDGER |
+| Depends on | 2.2, 2.4, 2.6, CF-1 |
+| Contract version | `cbl-protos@cf-1` (`billing/events/v1`, no proto changes) |
+| Status | done, review closed |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Замыкаются два отложенных контракта леджера (`CBL-000`, поток приема платежа, шаг 6):
-Ledger потребляет `payment.events` и на `payment.completed` делает проводку Dr clearing /
-Cr merchant идемпотентно по ключу `payment_id + event_type`; и продюсирует `ledger.events`
-(`transaction.posted`, `reserve.created/committed/released`) через outbox (отложено
-спеками 2.2 и 2.4 в эту задачу).
+Two deferred ledger contracts are closed (`CBL-000`, payment acceptance flow, step 6):
+the Ledger consumes `payment.events` and on `payment.completed` makes a Dr clearing /
+Cr merchant posting idempotently by the key `payment_id + event_type`; and it produces
+`ledger.events` (`transaction.posted`, `reserve.created/committed/released`) via the
+outbox (deferred by specs 2.2 and 2.4 to this task).
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: consumer `payment.events` (группа `cbl-ledger-payments`), шаблон проводки
-завершенного платежа, публикация `ledger.events` для всех мутаций леджера через outbox
-в транзакции бизнес-изменения, конфигурация main и compose-стенда, интеграционные и
-e2e-тесты (Kafka + PostgreSQL).
-Out of scope: изменения proto (CF-1/CF-2 не затрагиваются), прочие типы событий платежа,
-consumer/продюсер прочих топиков, Schema Registry (как в 3.5: schema_version заголовком),
-метрики outbox lag (0.7/14.x).
+In scope: the `payment.events` consumer (group `cbl-ledger-payments`), the posting template
+of a completed payment, publication of `ledger.events` for all ledger mutations via the
+outbox in the business-change transaction, main and compose stand configuration,
+integration and e2e tests (Kafka + PostgreSQL).
+Out of scope: proto changes (CF-1/CF-2 are not affected), other payment event types,
+consumers/producers of other topics, Schema Registry (as in 3.5: schema_version via a
+header), outbox lag metrics (0.7/14.x).
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. Consumer `payment.events` (kit: `inbox.Processor` + `kafkaconsumer` + retry-топики и
-DLQ): конверт `PaymentEvent` (protobuf) декодируется из сырого тела; обрабатывается только
-`PAYMENT_EVENT_TYPE_COMPLETED`, остальные типы подтверждаются без эффекта (ledger не ведет
-состояния счета). Дедупликация - inbox по `(consumer, event_id)`; poison-сообщения уходят в
-retry/DLQ по механике kit; повторная доставка не создает второго эффекта (два барьера:
-inbox и бизнес-ключ проводки).
+FR-1. The `payment.events` consumer (kit: `inbox.Processor` + `kafkaconsumer` + retry
+topics and DLQ): the `PaymentEvent` envelope (protobuf) is decoded from the raw body; only
+`PAYMENT_EVENT_TYPE_COMPLETED` is processed, other types are acknowledged without effect
+(the ledger keeps no account state). Deduplication is by inbox on `(consumer, event_id)`;
+poison messages go to retry/DLQ per the kit mechanics; redelivery creates no second effect
+(two barriers: the inbox and the posting business key).
 
-FR-2. Шаблон проводки `payment.completed` (ADR-2.7):
-- счета по плану счетов (2.6): мерчантский `(merchant_id, asset, decimals)`, платформенные
-  `clearing` и `fee` по активу; актив и decimals берутся из `received_amount`;
-- проводки: Dr clearing `received`; Cr merchant `received - fee` (если больше нуля);
-  Cr fee `fee` (если больше нуля); при `fee = 0` - две проводки, при `received = fee` -
-  без мерчантской;
-- ключ идемпотентности `payment:{payment_id}:completed`, `ref_type = payment`,
+FR-2. The `payment.completed` posting template (ADR-2.7):
+- accounts per the chart of accounts (2.6): the merchant account `(merchant_id, asset,
+  decimals)`, the platform `clearing` and `fee` accounts per asset; the asset and decimals
+  are taken from `received_amount`;
+- postings: Dr clearing `received`; Cr merchant `received - fee` (if greater than zero);
+  Cr fee `fee` (if greater than zero); with `fee = 0` there are two postings, with
+  `received = fee` there is no merchant posting;
+- idempotency key `payment:{payment_id}:completed`, `ref_type = payment`,
   `ref_id = payment_id`;
-- валидация недоверенного события: `payment_id` - UUID с канонизацией в нижний регистр
-  (бизнес-ключ и `ref_id` не зависят от формы записи UUID); `merchant_id` - правило
-  `merchant_ref` плана (`^[A-Za-z0-9_-]{1,128}$`); `received > 0`; `0 <= fee <= received`;
-  актив/decimals валидны и совпадают у received и fee; `expected_amount` игнорируется
-  (расчет - по полученной сумме);
-- событие с некорректными полями не ретраится бесконечно: ошибка валидации детерминирована
-  и штатно уходит в retry-топики, затем в DLQ (механика kit), с записью причины в заголовок
-  `x-error`; битый конверт повтора (невалидный `event_id`, отсутствующий `event_type`)
-  санитизируется kit-фиксом `CBL-1.3 (fix)` и тоже уходит в DLQ, не зацикливая партицию.
+- validation of the untrusted event: `payment_id` is a UUID with canonicalization to
+  lowercase (the business key and `ref_id` do not depend on the UUID representation);
+  `merchant_id` follows the plan `merchant_ref` rule (`^[A-Za-z0-9_-]{1,128}$`);
+  `received > 0`; `0 <= fee <= received`; the asset/decimals are valid and the same for
+  received and fee; `expected_amount` is ignored (the calculation uses the received amount);
+- an event with invalid fields is not retried indefinitely: a validation error is
+  deterministic and normally goes to the retry topics, then to the DLQ (the kit mechanics),
+  with the reason written to the `x-error` header; a broken redelivery envelope (an invalid
+  `event_id`, a missing `event_type`) is sanitized by the kit fix `CBL-1.3 (fix)` and also
+  goes to the DLQ without looping the partition.
 
-FR-3. Публикация `ledger.events` (outbox, в той же транзакции БД, что бизнес-изменение):
+FR-3. Publication of `ledger.events` (outbox, in the same DB transaction as the business
+change):
 
-| Тип события | Источник | `transaction_id` | `entries` | Ключ партиции |
+| Event type | Source | `transaction_id` | `entries` | Partition key |
 | :-- | :-- | :-- | :-- | :-- |
-| `transaction.posted` | `PostTransaction`, проводка FR-2 | заполнен | проводки транзакции | первый account_id проводок (лексикографически минимальный) |
-| `reserve.created` | `Reserve` | пуст | пусто | account_id резерва |
-| `reserve.committed` | `CommitReserve` | заполнен | пара Dr источник / Cr выплаты | account_id источника |
-| `reserve.released` | `ReleaseReserve` | пуст | пусто | account_id резерва |
+| `transaction.posted` | `PostTransaction`, the FR-2 posting | filled | the transaction postings | the first account_id of the postings (lexicographically minimal) |
+| `reserve.created` | `Reserve` | empty | empty | the reserve account_id |
+| `reserve.committed` | `CommitReserve` | filled | the pair Dr source / Cr payout | the source account_id |
+| `reserve.released` | `ReleaseReserve` | empty | empty | the reserve account_id |
 
-Тело - protobuf `billing.events.v1.LedgerEvent` (`transaction_id`, `type`, `ref_type`,
-`ref_id`, `entries[]`, `occurred_at`); заголовки конверта kit: `event_type`, `producer`
-(`cbl-ledger`), `schema_version` (`v1`), `occurred_at`, `traceparent` при наличии.
-Публикация - relay kit (`FOR UPDATE SKIP LOCKED`, at-least-once). События пишутся только
-при первой мутации: replay по ключу идемпотентности не создает повторных конвертов.
+The body is the protobuf `billing.events.v1.LedgerEvent` (`transaction_id`, `type`,
+`ref_type`, `ref_id`, `entries[]`, `occurred_at`); the kit envelope headers: `event_type`,
+`producer` (`cbl-ledger`), `schema_version` (`v1`), `occurred_at`, `traceparent` when
+present. Publication is by the kit relay (`FOR UPDATE SKIP LOCKED`, at-least-once). Events
+are written only on the first mutation: a replay by the idempotency key creates no repeated
+envelopes.
 
-FR-4. Путь consumer не дублирует бизнес-транзакцию Guard: handler выполняет
-`EnsureAccount` + `PostTransaction` своими транзакциями, а inbox-запись - второй барьер.
-Сбой между коммитом проводки и коммитом Guard безопасен: повтор распознается по бизнес-ключу
-(ADR-2.7). Обратный порядок невозможен (Guard вставляет inbox до вызова handler).
-Проводка, outbox-конверт и снимки пишутся атомарно.
+FR-4. The consumer path does not duplicate the Guard business transaction: the handler
+performs `EnsureAccount` + `PostTransaction` in its own transactions, and the inbox record
+is the second barrier. A failure between the posting commit and the Guard commit is safe:
+the repeat is recognized by the business key (ADR-2.7). The reverse order is impossible
+(the Guard inserts the inbox before calling the handler). The posting, the outbox envelope
+and the snapshots are written atomically.
 
-FR-5. Конфигурация: при заданном `KAFKA_BROKERS` поднимаются relay и consumer; группа
-`KAFKA_CONSUMER_GROUP` по умолчанию `cbl-ledger-payments`; при пустом `KAFKA_BROKERS`
-сервис работает без Kafka (WARN), gRPC-путь и события в outbox продолжают копиться.
-Compose-стенд создает топики `payment.events` (+ retry/DLQ) и `ledger.events`.
+FR-5. Configuration: when `KAFKA_BROKERS` is set, the relay and the consumer start; the
+`KAFKA_CONSUMER_GROUP` group defaults to `cbl-ledger-payments`; when `KAFKA_BROKERS` is
+empty, the service runs without Kafka (WARN), the gRPC path works and outbox events keep
+accumulating. The compose stand creates the topics `payment.events` (+ retry/DLQ) and
+`ledger.events`.
 
-## 4. Контракты
+## 4. Contracts
 
-Топики и заголовки - `CBL-003`, раздел 6. Ключ `ledger.events` в контракте описан как
-`account_id`; для многосчетных проводок ADR-2.7 уточняет выбор «первой» проводки
-(лексикографически минимальный account_id), что сохраняет стабильную партицию события.
-Формат бизнес-ключа `payment:{payment_id}:completed` соответствует `CBL-003` (раздел 5,
-правила идемпотентности проводок) и `CBL-000` (шаг 6).
+Topics and headers are in `CBL-003`, section 6. The `ledger.events` key is described in the
+contract as `account_id`; for multi-account postings ADR-2.7 clarifies the choice of the
+"first" posting (the lexicographically minimal account_id), which preserves a stable event
+partition. The business key format `payment:{payment_id}:completed` matches `CBL-003`
+(section 5, posting idempotency rules) and `CBL-000` (step 6).
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
-Схема не меняется: `outbox` и `inbox` созданы миграциями 00002/00003 (reference kit).
-Проводки и снимки - существующие таблицы; резервы - 00007.
+The schema does not change: `outbox` and `inbox` are created by migrations 00002/00003 (the
+kit reference). Postings and snapshots use existing tables; reserves - 00007.
 
-## 6. Конечные автоматы
+## 6. Finite state machines
 
-payment.completed -> проводка (терминально для леджера); повтор любого типа события не
-меняет состояние (дедупликация inbox, replay бизнес-ключа).
+payment.completed -> posting (terminal for the ledger); a repeat of any event type does not
+change the state (inbox deduplication, business key replay).
 
 ## 7. Edge cases
 
-Дубликат события (тот же `event_id`), повтор уведомления с другим `event_id` по тому же
-платежу (replay бизнес-ключа), повтор completed с измененным телом (received/fee) - конфликт
-тела ключа `idempotency_key_reuse`, ретраи и DLQ; корректировка - только сторно (10.x), не
-повтор события; `fee = 0`, `received = fee` (нет мерчантской проводки), `fee > received` и
-отрицательные суммы (отказ), не-UUID `payment_id`, `merchant_id` вне правил плана, разные
-активы received/fee, событие до `completed` (пропуск), `UNSPECIFIED` и неизвестный enum
-(пропуск), битый protobuf, сообщение без `event_id` и невалидный `event_id` (DLQ kit),
-невалидный traceparent (игнорируется), Kafka недоступна (outbox копит, consumer ждет),
-сбой после проводки до коммита Guard (replay), конкурентная доставка (один эффект).
+A duplicate event (the same `event_id`), a repeated notification with a different `event_id`
+for the same payment (business key replay), a repeated completed with a changed body
+(received/fee) - a body conflict on the key `idempotency_key_reuse`, retries and DLQ;
+correction is only via reversal (10.x), not by repeating the event; `fee = 0`,
+`received = fee` (no merchant posting), `fee > received` and negative amounts (rejected), a
+non-UUID `payment_id`, `merchant_id` outside the plan rules, different assets of
+received/fee, an event before `completed` (skipped), `UNSPECIFIED` and an unknown enum
+(skipped), broken protobuf, a message without `event_id` and an invalid `event_id` (kit
+DLQ), an invalid traceparent (ignored), Kafka unavailable (the outbox accumulates, the
+consumer waits), a failure after the posting but before the Guard commit (replay),
+concurrent delivery (a single effect).
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-Дедупликация - уникальный ключ inbox; at-least-once с идемпотентным эффектом; батчи relay
-до 100 (kit); обработка события - до трех идемпотентных `EnsureAccount` (обычно no-op по
-индексу) плюс проводка с бюджетом повторов 2.3. Покрытие unit+integration не ниже 80%;
-денежные сценарии только на реальных PostgreSQL и Kafka (testcontainers).
+Deduplication is by the inbox unique key; at-least-once with an idempotent effect; relay
+batches up to 100 (kit); event processing is up to three idempotent `EnsureAccount` calls
+(usually a no-op by the index) plus a posting with the 2.3 retry budget. Unit+integration
+coverage is at least 80%; money scenarios only on real PostgreSQL and Kafka (testcontainers).
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
-| Smoke | `go build ./...`; compose: миграции версии 8, топики `payment.events`/`ledger.events` созданы, consumer запущен (`payment consumer started`) |
-| Unit | шаблон проводки (fee=0, received=fee, каноникализация payment_id, отказы валидации); построение конверта `ledger.events` (типы, заголовки, ключ, payload, traceparent) |
-| Integration (PostgreSQL) | обработка `payment.completed` через `inbox.Processor`: счета, проводки, снимки, outbox-конверт; дубликат `event_id` подавлен; повтор другим `event_id` - replay; конкурентная доставка (один эффект); fee-шаблон; пропуск `UNSPECIFIED`/неизвестного enum; невалидный traceparent; ошибки валидации; события `reserve.*` и `transaction.posted` от gRPC-путей |
-| Integration (Kafka, testcontainers) | e2e `test/e2e/payment_consumer_kafka_test.go`: событие в `payment.events` -> проводка в PostgreSQL + конверт в `ledger.events`; дубликат не создает второй проводки |
-| E2E (compose) | расширенный smoke `test/e2e/reserve_flow.ps1`: топики созданы, consumer стартовал |
-| Load | не расширяется |
+| Smoke | `go build ./...`; compose: migrations version 8, the topics `payment.events`/`ledger.events` created, the consumer started (`payment consumer started`) |
+| Unit | posting template (fee=0, received=fee, payment_id canonicalization, validation rejections); `ledger.events` envelope building (types, headers, key, payload, traceparent) |
+| Integration (PostgreSQL) | processing of `payment.completed` via `inbox.Processor`: accounts, postings, snapshots, the outbox envelope; a duplicate `event_id` suppressed; a repeat with another `event_id` - replay; concurrent delivery (a single effect); the fee template; skipping of `UNSPECIFIED`/an unknown enum; an invalid traceparent; validation errors; `reserve.*` and `transaction.posted` events from the gRPC paths |
+| Integration (Kafka, testcontainers) | e2e `test/e2e/payment_consumer_kafka_test.go`: an event in `payment.events` -> a posting in PostgreSQL + an envelope in `ledger.events`; a duplicate creates no second posting |
+| E2E (compose) | extended smoke per the run instruction `test/e2e/E2E.md` (scenario E2E_Ledger_ReserveFlow, compose stand): topics created, consumer started |
+| Load | not extended |
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-Коммит `CBL-2.7: consumer payment.completed и публикация ledger.events`; спека входит в
-коммит; обновляются AGENTS (команды, trade-offs T-LED-08/09, журнал), `CBL-004` и
-примечания в спеках 2.2/2.4 о переданной ответственности.
+Commit `CBL-2.7: payment.completed consumer and ledger.events publication`; the spec is
+part of the commit; AGENTS (commands, trade-offs T-LED-08/09, the journal), `CBL-004` and
+the notes in specs 2.2/2.4 about the transferred responsibility are updated.
 
-## 11. Открытые вопросы и решения
+## 11. Open questions and decisions
 
-- ADR-2.7: handler не использует транзакцию Guard. Компенсация: бизнес-операция
-  идемпотентна по ключу `payment:{id}:completed` (повторный replay без эффекта), inbox-запись
-  остается вторым барьером; сбой между коммитами безопасен. Альтернатива (проводка в
-  переданной транзакции) невозможна без пересмотра retry-контура 2.3.
-- ADR: ключ партиции `ledger.events` для многосчетных проводок - лексикографически первый
-  account_id; контракт `CBL-003` («key account_id») уточняется этим правилом.
-- ADR: комиссия платформы вычитается из мерчантского кредита (Dr clearing на полную
-  полученную сумму, Cr fee на комиссию); согласовано с потоком CBL-000 (шаг 6).
-- ADR: `expected_amount` не участвует в проводке: леджер фиксирует фактически полученное;
-  недоплата/переплата - состояния Payment (4.5), не леджера.
-- Открытый вопрос: traceparent из gRPC-контекста в события появится с внедрением
-  OTel (0.7); сейчас пробрасывается только валидный по формату W3C заголовок Kafka-сообщения
-  consumer-пути (невалидные игнорируются), traceparent в событиях gRPC-путей отсутствует.
-- Открытый вопрос: Schema Registry для `ledger.events` - задача 0.5 (как в 3.5).
-- Принято с ограничением: outbox леджера растет на каждую мутацию и не чистится (relay только
-  проставляет `published_at`); ретеншен и архивация - задача 14.2 (KI-ledger-09).
-- ADR: `payment_id` канонизируется перед построением бизнес-ключа: недоверенная форма записи
-  UUID (регистр, скобки, urn, без дефисов) не должна обходить второй барьер (находка
-  безопасности ревью 2.7).
-- ADR: `UNSPECIFIED` и неизвестные enum подтверждаются без эффекта (после WARN-лога): леджер
-  не угадывает завершение по неполному событию; с точки зрения конвейера это не poison.
+- ADR-2.7: the handler does not use the Guard transaction. Compensation: the business
+  operation is idempotent by the key `payment:{id}:completed` (a repeated replay has no
+  effect), the inbox record remains the second barrier; a failure between the commits is
+  safe. The alternative (a posting in the passed transaction) is impossible without
+  revising the 2.3 retry loop.
+- ADR: the `ledger.events` partition key for multi-account postings is the lexicographically
+  first account_id; the `CBL-003` contract ("key account_id") is clarified by this rule.
+- ADR: the platform fee is deducted from the merchant credit (Dr clearing for the full
+  received amount, Cr fee for the fee); agreed with the CBL-000 flow (step 6).
+- ADR: `expected_amount` does not participate in the posting: the ledger records what was
+  actually received; underpayment/overpayment are Payment states (4.5), not ledger states.
+- Open question: traceparent from the gRPC context in events will appear with the OTel
+  rollout (0.7); currently only a Kafka message header valid per the W3C format is
+  propagated on the consumer path (invalid ones are ignored), and traceparent is absent in
+  events of the gRPC paths.
+- Open question: Schema Registry for `ledger.events` - task 0.5 (as in 3.5).
+- Accepted with a limitation: the ledger outbox grows on every mutation and is not cleaned
+  (the relay only sets `published_at`); retention and archiving are task 14.2 (KI-ledger-09).
+- ADR: `payment_id` is canonicalized before building the business key: an untrusted UUID
+  representation (case, braces, urn, no hyphens) must not bypass the second barrier (a
+  security finding of the 2.7 review).
+- ADR: `UNSPECIFIED` and unknown enums are acknowledged without effect (after a WARN log):
+  the ledger does not guess completion from an incomplete event; from the pipeline's point
+  of view this is not poison.
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (14.10.2026). Блокеры: неканоничный `payment_id` (двойная
-проводка) и вечная редоставка poison-сообщений в kit - закрыты (второй - фиксом kit
-`CBL-1.3 (fix)` с DLQ-фолбэками). Остальное закрыто или зафиксировано.
+Four independent passes (14.10.2026). Blockers: the non-canonical `payment_id` (double
+posting) and the endless redelivery of poison messages in the kit - closed (the latter by
+the kit fix `CBL-1.3 (fix)` with DLQ fallbacks). The rest is closed or recorded.
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | `UNSPECIFIED` уходит в DLQ вместо пропуска; `payment_id` без канонизации; документация/тесты неполны; НФР про один EnsureAccount неверен; Split брокеров без TrimSpace | UNSPECIFIED/неизвестный enum пропускаются (тесты); каноникализация UUID (тесты форм); НФР поправлен; splitCSV с TrimSpace; тесты снимков/пропусков добавлены; журнал/AGENTS обновляются этим коммитом |
-| Архитектуры | payment_id не канонизируется (опора ADR-2.7); outbox растет без ретеншена; CBL-003 не уточнен; последствия min-ключа не задокументированы; повтор с измененным телом не описан | каноникализация; KI-ledger-09 (ретеншен, 14.2); CBL-003 раздел 6 уточнен правилом ключа; T-LED-09 фиксирует горячие партиции и порядок; §7 и runbook дополнены сценарием reuse -> DLQ/сторно |
-| С контекстом | UNSPECIFIED-девиация; дублирование маппинга direction/money; мертвый лог sink; retry/DLQ не проверялся с publisher; smoke без проверки топиков; %v вместо %w | пропуск типов; дублирование оставлено осознанно (тонкие мапперы слоев, вынос при расширении контракта); лог используется; kit-тесты DLQ + e2e Kafka; скрипт проверяет топики; `%w` |
-| Безопасности | BLOCKER: неканоничный UUID обходит бизнес-ключ (двойное зачисление); BLOCKER: poison-конверты зацикливают партицию (kit); KI-ledger-02 устарел (Kafka-путь); traceparent без валидации; UNSPECIFIED; нет конкурентного теста | каноникализация + тесты форм; kit-фикс `CBL-1.3 (fix)` (санитизация DLQ, x-original-event-id, event_type=unknown) + regression-тесты; KI-ledger-02 дополнен Kafka-путем и ACL до prod; W3C-валидация traceparent + тест; пропуск; конкурентный integration-тест |
+| No context | `UNSPECIFIED` goes to the DLQ instead of being skipped; `payment_id` without canonicalization; documentation/tests incomplete; the NFR about a single EnsureAccount is wrong; broker Split without TrimSpace | UNSPECIFIED/an unknown enum are skipped (tests); UUID canonicalization (representation tests); the NFR corrected; splitCSV with TrimSpace; snapshot/skip tests added; the journal/AGENTS are updated by this commit |
+| Architecture | payment_id is not canonicalized (the ADR-2.7 pillar); the outbox grows without retention; CBL-003 is not clarified; the consequences of the min key are not documented; a repeat with a changed body is not described | canonicalization; KI-ledger-09 (retention, 14.2); CBL-003 section 6 clarified by the key rule; T-LED-09 records hot partitions and ordering; §7 and the runbook extended with the reuse -> DLQ/reversal scenario |
+| With context | the UNSPECIFIED deviation; duplicated direction/money mapping; a dead sink log; retry/DLQ was not tested with the publisher; smoke without topic checks; %v instead of %w | skipping of types; the duplication is left deliberately (thin layer mappers, extraction upon contract extension); the log is used; kit DLQ tests + Kafka e2e; the script checks topics; `%w` |
+| Security | BLOCKER: a non-canonical UUID bypasses the business key (double crediting); BLOCKER: poison envelopes loop the partition (kit); KI-ledger-02 is outdated (the Kafka path); traceparent without validation; UNSPECIFIED; no concurrency test | canonicalization + representation tests; the kit fix `CBL-1.3 (fix)` (DLQ sanitization, x-original-event-id, event_type=unknown) + regression tests; KI-ledger-02 extended with the Kafka path and ACLs before prod; W3C traceparent validation + a test; skipping; a concurrent integration test |

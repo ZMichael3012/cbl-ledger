@@ -11,64 +11,64 @@ import (
 	"github.com/cbl/cbl-ledger/internal/domain"
 )
 
-// Типы событий ledger.events (CBL-003, раздел 6).
+// Event types of ledger.events (CBL-003, section 6).
 const (
-	// EventTransactionPosted описывает проводку двойной записи.
+	// EventTransactionPosted describes a double-entry posting.
 	EventTransactionPosted = "transaction.posted"
-	// EventReserveCreated описывает создание удержания.
+	// EventReserveCreated describes the creation of a hold.
 	EventReserveCreated = "reserve.created"
-	// EventReserveCommitted описывает захват удержания.
+	// EventReserveCommitted describes the capture of a hold.
 	EventReserveCommitted = "reserve.committed"
-	// EventReserveReleased описывает возврат удержания.
+	// EventReserveReleased describes the release of a hold.
 	EventReserveReleased = "reserve.released"
 )
 
-// TxnEventEntry описывает проводку доменного события леджера.
+// TxnEventEntry describes an entry of a ledger domain event.
 type TxnEventEntry struct {
-	// AccountID задает счет проводки.
+	// AccountID sets the account of the entry.
 	AccountID string
-	// Direction задает направление проводки.
+	// Direction sets the direction of the entry.
 	Direction domain.Direction
-	// Amount задает сумму в минимальных единицах актива.
+	// Amount sets the amount in asset minor units.
 	Amount int64
-	// Asset задает код актива счета.
+	// Asset sets the account asset code.
 	Asset string
-	// Decimals задает количество знаков после точки.
+	// Decimals sets the number of decimal places.
 	Decimals int32
 }
 
-// TxnEvent описывает доменное событие ledger.events для публикации через outbox.
+// TxnEvent describes a ledger.events domain event for publication through the outbox.
 type TxnEvent struct {
-	// Type задает тип события: transaction.posted, reserve.created/committed/released.
+	// Type sets the event type: transaction.posted, reserve.created/committed/released.
 	Type string
-	// TransactionID задает проводку события (пусто для created/released).
+	// TransactionID sets the posting of the event (empty for created/released).
 	TransactionID string
-	// RefType задает тип бизнес-ссылки операции.
+	// RefType sets the type of the operation business reference.
 	RefType string
-	// RefID задает идентификатор бизнес-ссылки операции.
+	// RefID sets the identifier of the operation business reference.
 	RefID string
-	// OccurredAt задает время события.
+	// OccurredAt sets the event time.
 	OccurredAt time.Time
-	// Traceparent задает W3C trace context для конверта (если известен).
+	// Traceparent sets the W3C trace context for the envelope (if known).
 	Traceparent string
-	// Key задает ключ партиции ledger.events.
+	// Key sets the ledger.events partition key.
 	Key string
-	// Entries задает проводки события.
+	// Entries sets the entries of the event.
 	Entries []TxnEventEntry
 }
 
-// TxnEventSink записывает событие в outbox в транзакции бизнес-изменения.
+// TxnEventSink writes an event to the outbox within the business change transaction.
 type TxnEventSink interface {
-	// AppendTxnEvent добавляет конверт события в переданной транзакции.
+	// AppendTxnEvent appends the event envelope within the given transaction.
 	AppendTxnEvent(ctx context.Context, tx *gorm.DB, event TxnEvent) error
 }
 
-// WithEventSink подключает запись событий ledger.events; без sink события не пишутся.
+// WithEventSink enables ledger.events event writing; without a sink no events are written.
 func WithEventSink(sink TxnEventSink) Option {
 	return func(r *Repository) { r.eventSink = sink }
 }
 
-// emitEvent передает событие sink-у, если он настроен.
+// emitEvent passes the event to the sink if one is configured.
 func (r *Repository) emitEvent(ctx context.Context, tx *gorm.DB, event TxnEvent) error {
 	if r.eventSink == nil {
 		return nil
@@ -82,16 +82,16 @@ func (r *Repository) emitEvent(ctx context.Context, tx *gorm.DB, event TxnEvent)
 	return r.eventSink.AppendTxnEvent(ctx, tx, event)
 }
 
-// traceparentKey задает ключ контекста для W3C traceparent.
+// traceparentKey sets the context key for the W3C traceparent.
 type traceparentKey struct{}
 
-// traceparentPattern задает формат W3C trace context; произвольная строка
-// из заголовка Kafka не должна попадать в конверты и логи downstream.
+// traceparentPattern sets the W3C trace context format; an arbitrary string
+// from a Kafka header must not reach envelopes and downstream logs.
 var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`)
 
-// WithTraceparent сохраняет traceparent в контексте: consumer кладет заголовок
-// Kafka-сообщения, и событие леджера наследует трассировку источника.
-// Невалидный по формату W3C заголовок игнорируется.
+// WithTraceparent stores the traceparent in the context: the consumer puts the
+// Kafka message header there, and the ledger event inherits the tracing of the
+// source. A header invalid in the W3C format is ignored.
 func WithTraceparent(ctx context.Context, traceparent string) context.Context {
 	if !traceparentPattern.MatchString(traceparent) {
 		return ctx
@@ -99,7 +99,7 @@ func WithTraceparent(ctx context.Context, traceparent string) context.Context {
 	return context.WithValue(ctx, traceparentKey{}, traceparent)
 }
 
-// traceparentFromContext извлекает traceparent из контекста.
+// traceparentFromContext extracts the traceparent from the context.
 func traceparentFromContext(ctx context.Context) string {
 	value, _ := ctx.Value(traceparentKey{}).(string)
 	return value

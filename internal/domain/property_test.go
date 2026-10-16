@@ -16,11 +16,11 @@ import (
 	"github.com/cbl/cbl-ledger/internal/domain"
 )
 
-// maxEntriesLocal - независимая копия предела проводок (для проверки без домена).
+// maxEntriesLocal is an independent copy of the entries limit (for checking without the domain).
 const maxEntriesLocal = 100
 
-// propertyRand возвращает генератор property-тестов: фиксированный сид
-// по умолчанию, переопределяемый PROPERTY_SEED для локализации редких сбоев.
+// propertyRand returns the property test generator: a fixed seed
+// by default, overridable via PROPERTY_SEED to localize rare failures.
 func propertyRand(t *testing.T) *rand.Rand {
 	t.Helper()
 	seed := int64(20261014)
@@ -30,23 +30,23 @@ func propertyRand(t *testing.T) *rand.Rand {
 		seed = parsed
 	}
 	t.Logf("property domain seed: %d", seed)
-	return rand.New(rand.NewSource(seed)) //nolint:gosec // G404: сид property-теста, не криптография
+	return rand.New(rand.NewSource(seed)) //nolint:gosec // G404: property test seed, not cryptography
 }
 
-// rawEntryGen описывает сырой вход: направление может быть некорректным,
-// счет - пустым, сумма - любого знака.
+// rawEntryGen describes a raw input: the direction may be invalid,
+// the account may be empty, the amount may have any sign.
 type rawEntryGen struct {
 	Amount     int64
 	Direction  int
 	AccountIdx int
 }
 
-// rawCase описывает случайный несбалансированный вход.
+// rawCase describes a random unbalanced input.
 type rawCase struct {
 	Entries []rawEntryGen
 }
 
-// toEntries переводит сырой вход в проводки домена.
+// toEntries converts the raw input into domain entries.
 func (c rawCase) toEntries() []domain.EntryInput {
 	entries := make([]domain.EntryInput, 0, len(c.Entries))
 	for i, item := range c.Entries {
@@ -72,12 +72,12 @@ func (c rawCase) toEntries() []domain.EntryInput {
 	return entries
 }
 
-// balancedCase описывает вход, который по построению сбалансирован.
+// balancedCase describes an input that is balanced by construction.
 type balancedCase struct {
 	Amounts []int64
 }
 
-// toEntries строит пары дебет/кредит одной суммы (в пределах MaxEntries).
+// toEntries builds debit/credit pairs of the same amount (within MaxEntries).
 func (c balancedCase) toEntries() []domain.EntryInput {
 	entries := make([]domain.EntryInput, 0, len(c.Amounts)*2)
 	for i, value := range c.Amounts {
@@ -99,9 +99,9 @@ func (c balancedCase) toEntries() []domain.EntryInput {
 	return entries
 }
 
-// independentValid независимо (big.Int, строки направлений) проверяет ожидаемую
-// валидность набора: длины, положительные суммы, направления, непустые счета,
-// отсутствие переполнения int64, равенство дебетов и кредитов.
+// independentValid independently (big.Int, direction strings) checks the expected
+// validity of the set: lengths, positive amounts, directions, non-empty accounts,
+// no int64 overflow, equal debits and credits.
 func independentValid(entries []domain.EntryInput) bool {
 	if len(entries) < 2 || len(entries) > maxEntriesLocal {
 		return false
@@ -128,17 +128,17 @@ func independentValid(entries []domain.EntryInput) bool {
 	return debit.Cmp(credit) == 0
 }
 
-// checkPropertyValidateEntries сверяет вердикт домена с независимым пересчетом.
+// checkPropertyValidateEntries compares the domain verdict with the independent recount.
 func checkPropertyValidateEntries(t *testing.T, entries []domain.EntryInput, label string) bool {
 	t.Helper()
 	err := domain.ValidateEntries(entries)
 	expected := independentValid(entries)
 	if (err == nil) != expected {
-		t.Logf("%s: вход %+v, err=%v, ожидание валидности=%v", label, entries, err, expected)
+		t.Logf("%s: input %+v, err=%v, expected validity=%v", label, entries, err, expected)
 		return false
 	}
 	if err == nil {
-		// Принятый набор обязан быть сбалансированным при независимом пересчете.
+		// An accepted set must be balanced under the independent recount.
 		debit, credit := big.NewInt(0), big.NewInt(0)
 		for _, entry := range entries {
 			amount := big.NewInt(entry.Amount)
@@ -156,8 +156,8 @@ func checkPropertyValidateEntries(t *testing.T, entries []domain.EntryInput, lab
 func TestPropertyValidateEntriesBalanced(t *testing.T) {
 	t.Parallel()
 
-	// Гарантированно сбалансированные входы: направление "принятие" свойства
-	// обязано исполняться (не только отказы).
+	// Guaranteed balanced inputs: the "accept" side of the property
+	// must execute (not only rejections).
 	rng := propertyRand(t)
 	accepted := 0
 	property := func(c balancedCase) bool {
@@ -168,13 +168,13 @@ func TestPropertyValidateEntriesBalanced(t *testing.T) {
 		return checkPropertyValidateEntries(t, entries, "balanced")
 	}
 	require.NoError(t, quick.Check(property, &quick.Config{MaxCount: 200, Rand: rng}))
-	require.Greater(t, accepted, 0, "свойство обязано принимать сбалансированные входы")
+	require.Greater(t, accepted, 0, "the property must accept balanced inputs")
 }
 
 func TestPropertyValidateEntriesRaw(t *testing.T) {
 	t.Parallel()
 
-	// Сырые входы: суммы любого знака и порядка, невалидные направления и пустые счета.
+	// Raw inputs: amounts of any sign and order, invalid directions and empty accounts.
 	rng := propertyRand(t)
 	rejected := 0
 	property := func(c rawCase) bool {
@@ -185,7 +185,7 @@ func TestPropertyValidateEntriesRaw(t *testing.T) {
 		return checkPropertyValidateEntries(t, entries, "raw")
 	}
 	require.NoError(t, quick.Check(property, &quick.Config{MaxCount: 200, Rand: rng}))
-	require.Greater(t, rejected, 0, "сырые входы обязаны порождать отказы")
+	require.Greater(t, rejected, 0, "raw inputs must produce rejections")
 }
 
 func TestPropertyValidateEntriesBoundaries(t *testing.T) {
@@ -202,12 +202,12 @@ func TestPropertyValidateEntriesBoundaries(t *testing.T) {
 		return entries
 	}
 
-	// Предел принимается, предел минус шаг принимается, предел плюс пара отклоняется.
+	// The limit is accepted, the limit minus a step is accepted, the limit plus a pair is rejected.
 	require.NoError(t, domain.ValidateEntries(build(maxEntriesLocal/2)))
 	require.NoError(t, domain.ValidateEntries(build(maxEntriesLocal/2-1)))
 	require.ErrorIs(t, domain.ValidateEntries(build(maxEntriesLocal/2+1)), domain.ErrInvalidTransaction)
 
-	// Переполнение int64 отклоняется даже при формально равных суммах.
+	// int64 overflow is rejected even when the sums are formally equal.
 	overflow := []domain.EntryInput{
 		{AccountID: "a", Direction: domain.DirectionDebit, Amount: math.MaxInt64},
 		{AccountID: "b", Direction: domain.DirectionDebit, Amount: math.MaxInt64},

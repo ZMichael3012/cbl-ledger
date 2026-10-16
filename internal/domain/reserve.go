@@ -2,20 +2,20 @@ package domain
 
 import "fmt"
 
-// ReserveStatus описывает состояние резерва средств.
+// ReserveStatus describes the state of a funds reservation.
 type ReserveStatus string
 
-// Состояния резерва.
+// Reserve states.
 const (
-	// ReserveStatusActive описывает активное удержание средств.
+	// ReserveStatusActive describes an active hold on funds.
 	ReserveStatusActive ReserveStatus = "active"
-	// ReserveStatusCommitted описывает резерв, превращенный в проводку.
+	// ReserveStatusCommitted describes a reserve converted into an entry.
 	ReserveStatusCommitted ReserveStatus = "committed"
-	// ReserveStatusReleased описывает возвращенный резерв.
+	// ReserveStatusReleased describes a released reserve.
 	ReserveStatusReleased ReserveStatus = "released"
 )
 
-// Valid сообщает, что статус резерва известен.
+// Valid reports whether the reserve status is known.
 func (s ReserveStatus) Valid() bool {
 	switch s {
 	case ReserveStatusActive, ReserveStatusCommitted, ReserveStatusReleased:
@@ -25,12 +25,12 @@ func (s ReserveStatus) Valid() bool {
 	}
 }
 
-// Terminal сообщает, что резерв завершен и переходы из него невозможны.
+// Terminal reports that the reserve is finished and no transitions from it are possible.
 func (s ReserveStatus) Terminal() bool {
 	return s == ReserveStatusCommitted || s == ReserveStatusReleased
 }
 
-// ValidateReserveAmount проверяет сумму удержания: строго положительная.
+// ValidateReserveAmount checks the hold amount: strictly positive.
 func ValidateReserveAmount(amount int64) error {
 	if amount <= 0 {
 		return fmt.Errorf("%w: amount must be positive", ErrInvalidReserve)

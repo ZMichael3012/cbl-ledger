@@ -19,30 +19,30 @@ import (
 	"github.com/cbl/cbl-ledger/internal/storage"
 )
 
-// Константы consumer-конвейера платежей.
+// Payment consumer pipeline constants.
 const (
-	// TopicPaymentEvents задает топик событий платежей.
+	// TopicPaymentEvents sets the payment events topic.
 	TopicPaymentEvents = "payment.events"
-	// ConsumerGroupPayments задает группу консьюмера платежей по умолчанию.
+	// ConsumerGroupPayments sets the default payment consumer group.
 	ConsumerGroupPayments = "cbl-ledger-payments"
-	// paymentRefType задает тип бизнес-ссылки проводок по платежам.
+	// paymentRefType sets the business reference type for payment entries.
 	paymentRefType = "payment"
 )
 
-// errInvalidPaymentEvent сообщает о некорректном событии платежа: такой вход
-// не ретраится бессмысленно долго, а штатно уходит в retry-топики и DLQ.
+// errInvalidPaymentEvent reports an invalid payment event: such input
+// is not retried pointlessly long, but goes through retry topics to the DLQ as designed.
 var errInvalidPaymentEvent = errors.New("usecase: invalid payment event")
 
-// PaymentConsumer превращает payment.completed в проводку леджера:
-// Dr clearing / Cr merchant (за вычетом комиссии) / Cr fee.
-// Реализует inbox.Handler; бизнес-операция идемпотентна по ключу
-// `payment:{payment_id}:completed`, поэтому транзакция Guard не требуется (ADR-2.7).
+// PaymentConsumer converts payment.completed into a ledger entry:
+// Dr clearing / Cr merchant (net of the fee) / Cr fee.
+// It implements inbox.Handler; the business operation is idempotent by the key
+// `payment:{payment_id}:completed`, so a Guard transaction is not required (ADR-2.7).
 type PaymentConsumer struct {
 	ledger *Ledger
 	log    *zap.Logger
 }
 
-// NewPaymentConsumer создает PaymentConsumer.
+// NewPaymentConsumer creates a PaymentConsumer.
 func NewPaymentConsumer(ledger *Ledger, log *zap.Logger) *PaymentConsumer {
 	if log == nil {
 		log = zap.NewNop()
@@ -50,24 +50,24 @@ func NewPaymentConsumer(ledger *Ledger, log *zap.Logger) *PaymentConsumer {
 	return &PaymentConsumer{ledger: ledger, log: log}
 }
 
-// completedPosting описывает проверенные параметры проводки завершенного платежа.
+// completedPosting describes the validated posting parameters of a completed payment.
 type completedPosting struct {
-	// PaymentID задает канонический UUID платежа (нижний регистр с дефисами).
+	// PaymentID sets the canonical payment UUID (lowercase with hyphens).
 	PaymentID string
-	// MerchantKey задает ключ мерчантского счета плана счетов.
+	// MerchantKey sets the account plan key of the merchant account.
 	MerchantKey domain.AccountKey
-	// Asset задает актив полученной суммы.
+	// Asset sets the asset of the received amount.
 	Asset string
-	// Decimals задает шкалу полученной суммы.
+	// Decimals sets the scale of the received amount.
 	Decimals int32
-	// Received задает фактически полученную сумму.
+	// Received sets the actually received amount.
 	Received int64
-	// Fee задает комиссию платформы (может быть нулем).
+	// Fee sets the platform fee (may be zero).
 	Fee int64
 }
 
-// Handle обрабатывает событие платежа: completed превращается в проводку,
-// остальные типы подтверждаются без эффекта (леджер не ведет их состояния).
+// Handle processes a payment event: completed turns into an entry,
+// other types are acknowledged without effect (the ledger does not track their states).
 func (c *PaymentConsumer) Handle(ctx context.Context, _ *gorm.DB, msg inbox.Message) error {
 	var event eventsv1.PaymentEvent
 	if err := proto.Unmarshal(msg.Value, &event); err != nil {
@@ -76,8 +76,8 @@ func (c *PaymentConsumer) Handle(ctx context.Context, _ *gorm.DB, msg inbox.Mess
 	switch event.GetType() {
 	case eventsv1.PaymentEventType_PAYMENT_EVENT_TYPE_COMPLETED:
 	case eventsv1.PaymentEventType_PAYMENT_EVENT_TYPE_UNSPECIFIED:
-		// Заполненный enum обязателен: пустой тип не подтверждает завершение,
-		// но и не является poison-сообщением - подтверждаем без эффекта (FR-1).
+		// A populated enum is required: an empty type does not confirm completion,
+		// but is not a poison message either - we acknowledge it without effect (FR-1).
 		c.log.Warn("payment event without type skipped", zap.String("payment_id", event.GetPaymentId()))
 		return nil
 	default:
@@ -149,10 +149,10 @@ func (c *PaymentConsumer) Handle(ctx context.Context, _ *gorm.DB, msg inbox.Mess
 	return nil
 }
 
-// buildCompletedPosting проверяет недоверенное событие завершенного платежа
-// и собирает параметры проводки по плану счетов. Идентификатор платежа
-// канонизируется: бизнес-ключ идемпотентности обязан не зависеть от формы
-// записи UUID (регистр, скобки, urn, форма без дефисов).
+// buildCompletedPosting validates the untrusted completed payment event
+// and builds the posting parameters according to the account plan. The payment identifier
+// is canonicalized: the idempotency business key must not depend on the UUID
+// notation (case, braces, urn, hyphenless form).
 func buildCompletedPosting(event *eventsv1.PaymentEvent) (completedPosting, error) {
 	parsedPaymentID, err := uuid.Parse(event.GetPaymentId())
 	if err != nil {
@@ -163,7 +163,7 @@ func buildCompletedPosting(event *eventsv1.PaymentEvent) (completedPosting, erro
 		return completedPosting{}, fmt.Errorf("%w: received_amount must be positive", errInvalidPaymentEvent)
 	}
 	asset := received.GetAsset()
-	decimals := int32(received.GetDecimals()) //nolint:gosec // G115: переполнение отсеет Validate плана счетов
+	decimals := int32(received.GetDecimals()) //nolint:gosec // G115: the account plan Validate rejects overflow
 	merchantKey := domain.MerchantAccountKey(event.GetMerchantId(), asset, decimals)
 	if err := merchantKey.Validate(); err != nil {
 		return completedPosting{}, fmt.Errorf("%w: merchant account key: %w", errInvalidPaymentEvent, err)

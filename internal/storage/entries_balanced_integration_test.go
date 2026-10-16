@@ -13,7 +13,7 @@ import (
 	"github.com/cbl/cbl-ledger/internal/storage"
 )
 
-// insertRawTransaction вставляет транзакцию в обход приложения для проверки барьера БД.
+// insertRawTransaction inserts a transaction bypassing the application to verify the database barrier.
 func insertRawTransaction(tx *gorm.DB, key string) (string, error) {
 	transactionID := uuid.Must(uuid.NewV7()).String()
 	err := tx.Exec(

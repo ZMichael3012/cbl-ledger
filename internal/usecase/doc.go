@@ -1,3 +1,3 @@
-// Пакет usecase содержит сценарии использования сервиса ledger:
-// оркестрацию доменных правил, транзакций и публикации событий.
+// Package usecase contains the use cases of the ledger service:
+// orchestration of domain rules, transactions and event publication.
 package usecase

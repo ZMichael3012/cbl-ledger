@@ -1,11 +1,11 @@
-// Нагрузочный сценарий CBL-2.9: PostTransaction через gRPC на compose-стенд леджера.
-// Команды приведены для cmd.exe (из каталога services/cbl-ledger):
+// Load scenario CBL-2.9: PostTransaction via gRPC against the ledger compose stand.
+// Commands are given for cmd.exe (from the services/cbl-ledger directory):
 //   docker compose -f deploy/docker-compose.yml --profile app up -d --build
 //   docker compose -f deploy/docker-compose.yml cp test/load/seed.sql postgres:/tmp/seed.sql
 //   docker compose -f deploy/docker-compose.yml exec -T postgres psql -U cbl -d ledger -f /tmp/seed.sql
 //   docker run --rm -i -v "%CD%/test/load":/scripts -v "%CD%/../cbl-protos/proto":/proto grafana/k6:2.3.0 run ^
 //     -e LEDGER_ADDR=host.docker.internal:9040 -e RATE=100 -e DURATION=30s /scripts/post_transaction.js
-// В PowerShell те же команды с $PWD и без символа продолжения строки.
+// In PowerShell the same commands with $PWD and without the line continuation character.
 import grpc from 'k6/net/grpc';
 import { check } from 'k6';
 import { Rate } from 'k6/metrics';
@@ -19,12 +19,12 @@ const duration = __ENV.DURATION || '30s';
 const pairs = Math.max(1, Math.min(Number(__ENV.PAIRS) || 64, 256));
 const preAllocatedVUs = Number(__ENV.PRE_VUS || 50);
 const maxVUs = Number(__ENV.MAX_VUS || 300);
-// Уникальный префикс ключа идемпотентности на запуск: повторный прогон не является replay.
-// Длина ключа ограничена: префикс 14 символов + vu + iter, лимит ключа 128 символов (2.2).
+// Unique idempotency key prefix per run: a repeated run is not a replay.
+// Key length is limited: prefix 14 characters + vu + iter, key limit 128 characters (2.2).
 const runID = __ENV.RUN_ID || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
-// transportFailures фиксирует и исключения транспорта, и ответы со статусом не OK:
-// check() не выполняется при брошенном invoke, поэтому доля успеха покрыта отдельным порогом.
+// transportFailures records both transport exceptions and responses with a non-OK status:
+// check() is not executed when invoke throws, so the success rate is covered by a separate threshold.
 const transportFailures = new Rate('transport_failures');
 
 export const options = {
@@ -46,7 +46,7 @@ export const options = {
   },
 };
 
-// accountID повторяет детерминированные UUID из test/load/seed.sql.
+// accountID reproduces the deterministic UUIDs from test/load/seed.sql.
 function accountID(prefix, index) {
   return prefix + index.toString(16).padStart(12, '0');
 }

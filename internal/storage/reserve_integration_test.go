@@ -54,7 +54,7 @@ func TestIntegrationReserveCreatesHold(t *testing.T) {
 
 	var entries int64
 	require.NoError(t, db.Model(&storage.Entry{}).Count(&entries).Error)
-	assert.Zero(t, entries, "удержание не создает проводок")
+	assert.Zero(t, entries, "a hold creates no entries")
 }
 
 func TestIntegrationReserveReplayAndReuse(t *testing.T) {
@@ -74,7 +74,7 @@ func TestIntegrationReserveReplayAndReuse(t *testing.T) {
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)
 	assert.Equal(t, int64(60_000), balance.Available)
-	assert.Equal(t, int64(40_000), balance.Reserved, "повтор ключа не удерживает дважды")
+	assert.Equal(t, int64(40_000), balance.Reserved, "a key repeat does not hold twice")
 
 	_, err = repo.Reserve(ctx, reserveInput(merchant.ID, 30_000, "payout-1:reserve", "payout-1"))
 	require.Error(t, err)
@@ -127,7 +127,7 @@ func TestIntegrationReserveRejections(t *testing.T) {
 
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)
-	assert.Equal(t, int64(10_000), balance.Available, "отказы не меняют баланс")
+	assert.Equal(t, int64(10_000), balance.Available, "rejections do not change the balance")
 	assert.Zero(t, balance.Reserved)
 }
 
@@ -157,8 +157,8 @@ func TestIntegrationReserveConcurrentOversubscribe(t *testing.T) {
 			okCount++
 		}
 	}
-	assert.GreaterOrEqual(t, okCount, 1, "при доступном балансе минимум одно удержание проходит")
-	assert.LessOrEqual(t, okCount, 3, "нельзя зарезервировать больше доступного")
+	assert.GreaterOrEqual(t, okCount, 1, "with available balance at least one hold succeeds")
+	assert.LessOrEqual(t, okCount, 3, "cannot reserve more than available")
 
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)
@@ -184,15 +184,15 @@ func TestIntegrationCommitReserve(t *testing.T) {
 
 	var merchantBalance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&merchantBalance).Error)
-	assert.Equal(t, int64(60_000), merchantBalance.Available, "захват не трогает available источника")
-	assert.Zero(t, merchantBalance.Reserved, "удержание снято")
+	assert.Equal(t, int64(60_000), merchantBalance.Available, "a commit does not touch the source available")
+	assert.Zero(t, merchantBalance.Reserved, "the hold is removed")
 
 	var payout storage.Account
 	require.NoError(t, db.Where("type = ? AND asset = ?", "payout", "USDT").First(&payout).Error)
 	assert.Equal(t, "m-1", *payout.MerchantRef)
 	derivedPayout, err := domain.DeriveAccountID(domain.PayoutAccountKey("m-1", "USDT", 2))
 	require.NoError(t, err)
-	assert.Equal(t, derivedPayout.String(), payout.ID, "счет выплат создан по плану счетов (ADR-2.6)")
+	assert.Equal(t, derivedPayout.String(), payout.ID, "the payout account is created per the account plan (ADR-2.6)")
 	var payoutBalance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", payout.ID).First(&payoutBalance).Error)
 	assert.Equal(t, int64(40_000), payoutBalance.Available)
@@ -248,7 +248,7 @@ func TestIntegrationCommitReserveIdempotency(t *testing.T) {
 
 	var transactionCount int64
 	require.NoError(t, db.Model(&storage.Transaction{}).Count(&transactionCount).Error)
-	assert.Equal(t, int64(1), transactionCount, "повторы не создают проводок")
+	assert.Equal(t, int64(1), transactionCount, "repeats create no transactions")
 
 	var entriesCount int64
 	require.NoError(t, db.Model(&storage.Entry{}).Count(&entriesCount).Error)
@@ -294,7 +294,7 @@ func TestIntegrationReleaseReserve(t *testing.T) {
 
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)
-	assert.Equal(t, int64(100_000), balance.Available, "средства вернулись")
+	assert.Equal(t, int64(100_000), balance.Available, "funds are returned")
 	assert.Zero(t, balance.Reserved)
 
 	var stored storage.Reserve
@@ -309,7 +309,7 @@ func TestIntegrationReleaseReserve(t *testing.T) {
 
 	var entries int64
 	require.NoError(t, db.Model(&storage.Entry{}).Count(&entries).Error)
-	assert.Zero(t, entries, "возврат удержания не создает проводок")
+	assert.Zero(t, entries, "a hold release creates no entries")
 
 	stateRepeat, err := repo.ReleaseReserve(ctx, "payout-1:release-again", reserve.ReserveID, "")
 	require.NoError(t, err)
@@ -366,7 +366,7 @@ func TestIntegrationCommitReserveConcurrent(t *testing.T) {
 
 	var transactionCount int64
 	require.NoError(t, db.Model(&storage.Transaction{}).Count(&transactionCount).Error)
-	assert.Equal(t, int64(1), transactionCount, "ровно одна проводка на конкурентный захват")
+	assert.Equal(t, int64(1), transactionCount, "exactly one transaction per concurrent commit")
 
 	var entriesCount int64
 	require.NoError(t, db.Model(&storage.Entry{}).Count(&entriesCount).Error)
@@ -376,7 +376,7 @@ func TestIntegrationCommitReserveConcurrent(t *testing.T) {
 	require.NoError(t, db.Where("type = ? AND asset = ?", "payout", "USDT").First(&payout).Error)
 	var payoutBalance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", payout.ID).First(&payoutBalance).Error)
-	assert.Equal(t, int64(40_000), payoutBalance.Available, "средства зачислены ровно один раз")
+	assert.Equal(t, int64(40_000), payoutBalance.Available, "funds are credited exactly once")
 }
 
 func TestIntegrationCommitReusesExistingPayoutAccount(t *testing.T) {
@@ -393,7 +393,7 @@ func TestIntegrationCommitReusesExistingPayoutAccount(t *testing.T) {
 
 	var accounts int64
 	require.NoError(t, db.Model(&storage.Account{}).Where("type = ?", "payout").Count(&accounts).Error)
-	assert.Equal(t, int64(1), accounts, "существующий счет выплат переиспользован")
+	assert.Equal(t, int64(1), accounts, "the existing payout account is reused")
 
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", payout.ID).First(&balance).Error)
@@ -418,18 +418,18 @@ func TestIntegrationReleaseAvailableOverflow(t *testing.T) {
 
 	reserve, err := repo.Reserve(ctx, reserveInput(merchant.ID, 100, "payout-1:reserve", "payout-1"))
 	require.NoError(t, err)
-	// Смещаем available к потолку int64: возврат удержания обязан упереться в переполнение.
+	// Shift available to the int64 ceiling: the hold release must hit the overflow.
 	require.NoError(t, db.Model(&storage.Balance{}).Where("account_id = ?", merchant.ID).
 		Updates(map[string]any{"available": int64(math.MaxInt64 - 50), "reserved": int64(100)}).Error)
 
 	_, err = repo.ReleaseReserve(ctx, "payout-1:release", reserve.ReserveID, "overflow")
-	require.Error(t, err, "переполнение available отклонено")
+	require.Error(t, err, "available overflow is rejected")
 	assert.NotErrorIs(t, err, domain.ErrInvalidReserve)
 	assert.NotErrorIs(t, err, domain.ErrReserveState)
 
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)
-	assert.Equal(t, int64(math.MaxInt64-50), balance.Available, "откат вернул баланс")
+	assert.Equal(t, int64(math.MaxInt64-50), balance.Available, "the rollback restored the balance")
 	assert.Equal(t, int64(100), balance.Reserved)
 }
 
@@ -450,11 +450,11 @@ func TestIntegrationCommitKeyCollisionWithTransaction(t *testing.T) {
 
 	_, err = repo.CommitReserve(ctx, "shared-key", reserve.ReserveID)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, domain.ErrIdempotencyReuse, "ключ занят проводкой PostTransaction")
+	assert.ErrorIs(t, err, domain.ErrIdempotencyReuse, "the key is taken by a PostTransaction")
 
 	var reserveAfter storage.Reserve
 	require.NoError(t, db.Where("id = ?", reserve.ReserveID).First(&reserveAfter).Error)
-	assert.Equal(t, "active", reserveAfter.Status, "неудачный коммит не изменил резерв")
+	assert.Equal(t, "active", reserveAfter.Status, "a failed commit did not change the reserve")
 }
 
 func TestIntegrationCommitStateRepeatKeyBinding(t *testing.T) {
@@ -468,19 +468,19 @@ func TestIntegrationCommitStateRepeatKeyBinding(t *testing.T) {
 	_, err = repo.CommitReserve(ctx, "payout-1:commit", first.ReserveID)
 	require.NoError(t, err)
 
-	// Повтор в терминальном статусе с новым ключом обязан зафиксировать ключ.
+	// A repeat in a terminal state with a new key must persist the key.
 	stateRepeat, err := repo.CommitReserve(ctx, "payout-1:commit2", first.ReserveID)
 	require.NoError(t, err)
 	assert.Equal(t, domain.ReserveStatusCommitted, stateRepeat.Status)
 
-	// Тот же ключ на другом резерве - конфликт тела ключа, а не тихий захват.
+	// The same key on another reserve is a key body conflict, not a silent commit.
 	second, err := repo.Reserve(ctx, reserveInput(merchant.ID, 10_000, "payout-2:reserve", "payout-2"))
 	require.NoError(t, err)
 	_, err = repo.CommitReserve(ctx, "payout-1:commit2", second.ReserveID)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, domain.ErrIdempotencyReuse)
 
-	// Повтор того же ключа на исходном резерве - идемпотентный replay.
+	// A repeat of the same key on the original reserve is an idempotent replay.
 	replay, err := repo.CommitReserve(ctx, "payout-1:commit2", first.ReserveID)
 	require.NoError(t, err)
 	assert.True(t, replay.Replayed)
@@ -488,7 +488,7 @@ func TestIntegrationCommitStateRepeatKeyBinding(t *testing.T) {
 
 	var reserveAfter storage.Reserve
 	require.NoError(t, db.Where("id = ?", second.ReserveID).First(&reserveAfter).Error)
-	assert.Equal(t, "active", reserveAfter.Status, "чужой ключ не захватил второй резерв")
+	assert.Equal(t, "active", reserveAfter.Status, "the foreign key did not commit the second reserve")
 }
 
 func TestIntegrationCommitDestinationDecimalsMismatch(t *testing.T) {
@@ -502,7 +502,7 @@ func TestIntegrationCommitDestinationDecimalsMismatch(t *testing.T) {
 	require.NoError(t, err)
 	_, err = repo.CommitReserve(ctx, "payout-1:commit", reserve.ReserveID)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, domain.ErrAssetMismatch, "шкалы источника и счета выплат обязаны совпадать")
+	assert.ErrorIs(t, err, domain.ErrAssetMismatch, "the scales of the source and the payout account must match")
 }
 
 func TestIntegrationReserveReservedOverflow(t *testing.T) {
@@ -516,7 +516,7 @@ func TestIntegrationReserveReservedOverflow(t *testing.T) {
 
 	_, err = repo.Reserve(ctx, reserveInput(merchant.ID, 1, "overflow-2", "r-2"))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, domain.ErrInvalidReserve, "переполнение reserved отклонено")
+	assert.ErrorIs(t, err, domain.ErrInvalidReserve, "reserved overflow is rejected")
 
 	var balance storage.Balance
 	require.NoError(t, db.Where("account_id = ?", merchant.ID).First(&balance).Error)

@@ -52,10 +52,10 @@ func TestIntegrationGetBalance(t *testing.T) {
 	empty := seedAccount(t, db, "merchant", "USDT", 2, "m-empty", 0)
 	view, err = repo.GetBalance(ctx, empty.ID)
 	require.NoError(t, err)
-	assert.Zero(t, view.Available, "нулевой доступный баланс возвращается явно")
+	assert.Zero(t, view.Available, "a zero available balance is returned explicitly")
 	assert.Zero(t, view.Reserved)
 
-	// Счет без балансового ряда - испорченный провижининг: fail-closed.
+	// An account without a balance row is broken provisioning: fail-closed.
 	broken := storage.Account{
 		ID:        "018f0000-0000-7000-8000-0000000000aa",
 		Type:      "merchant",
@@ -101,7 +101,7 @@ func TestIntegrationListEntriesPagination(t *testing.T) {
 	assert.Equal(t, int32(2), page[0].Decimals)
 	assert.NotEmpty(t, page[0].TransactionID)
 	assert.False(t, page[0].CreatedAt.IsZero())
-	assert.Less(t, page[0].EntryID, page[1].EntryID, "выписка по возрастанию entry_id")
+	assert.Less(t, page[0].EntryID, page[1].EntryID, "the statement is ordered by ascending entry_id")
 
 	seen := append([]storage.EntryView{}, page...)
 	for cursor != "" {
@@ -111,18 +111,18 @@ func TestIntegrationListEntriesPagination(t *testing.T) {
 	}
 	require.Len(t, seen, 5)
 	for i := 1; i < len(seen); i++ {
-		assert.Less(t, seen[i-1].EntryID, seen[i].EntryID, "страницы не пересекаются и не пропускают записи")
+		assert.Less(t, seen[i-1].EntryID, seen[i].EntryID, "pages do not overlap and do not skip records")
 	}
 	assert.Equal(t, int64(500), seen[4].Amount)
 
 	emptyAccount := seedAccount(t, db, "clearing", "USDT", 2, "", 0)
 	empty, cursor, err := repo.ListEntries(ctx, storage.EntryFilter{AccountID: emptyAccount.ID})
 	require.NoError(t, err)
-	assert.Empty(t, empty, "счет без проводок дает пустую страницу")
+	assert.Empty(t, empty, "an account without entries yields an empty page")
 	assert.Empty(t, cursor)
 
 	_, cursor, err = repo.ListEntries(ctx, storage.EntryFilter{AccountID: merchant.ID, Limit: 500})
-	require.NoError(t, err, "limit больше потолка клампится")
+	require.NoError(t, err, "a limit above the ceiling is clamped")
 	assert.Empty(t, cursor)
 }
 
@@ -138,8 +138,8 @@ func TestIntegrationListEntriesRejections(t *testing.T) {
 
 	for _, cursor := range []string{"abc", "-1", "1.5", "999999999999999999999999"} {
 		_, _, err = repo.ListEntries(ctx, storage.EntryFilter{AccountID: merchant.ID, Limit: 10, Cursor: cursor})
-		require.Error(t, err, "курсор %q", cursor)
-		assert.ErrorIs(t, err, domain.ErrInvalidCursor, "курсор %q", cursor)
+		require.Error(t, err, "cursor %q", cursor)
+		assert.ErrorIs(t, err, domain.ErrInvalidCursor, "cursor %q", cursor)
 	}
 }
 
@@ -169,16 +169,16 @@ func TestIntegrationReplayReturnsSnapshot(t *testing.T) {
 	for _, snapshot := range replay.Balances {
 		byAccount[snapshot.AccountID] = snapshot
 	}
-	assert.Equal(t, int64(90_000), byAccount[merchant.ID].Available, "снимок на момент первой проводки")
+	assert.Equal(t, int64(90_000), byAccount[merchant.ID].Available, "snapshot at the time of the first transaction")
 	assert.Equal(t, int64(10_000), byAccount[fee.ID].Available)
 
 	current, err := repo.GetBalance(ctx, merchant.ID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(70_000), current.Available, "текущий баланс отличается от снимка")
+	assert.Equal(t, int64(70_000), current.Available, "the current balance differs from the snapshot")
 
 	var snapshotRows int64
 	require.NoError(t, db.Model(&storage.TransactionBalance{}).Count(&snapshotRows).Error)
-	assert.Equal(t, int64(4), snapshotRows, "по два снимка на каждую транзакцию")
+	assert.Equal(t, int64(4), snapshotRows, "two snapshots per transaction")
 }
 
 func TestIntegrationReplayLegacyWithoutSnapshot(t *testing.T) {
@@ -196,7 +196,7 @@ func TestIntegrationReplayLegacyWithoutSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	postPayment(t, repo, "pay-2:completed", "pay-2", merchant.ID, fee.ID, 20_000)
 
-	// Транзакции до миграции 00008 не имеют снимков: повтор читает текущие балансы.
+	// Transactions before migration 00008 have no snapshots: a replay reads the current balances.
 	require.NoError(t, db.Where("transaction_id = ?", first.TransactionID).
 		Delete(&storage.TransactionBalance{}).Error)
 
@@ -205,7 +205,7 @@ func TestIntegrationReplayLegacyWithoutSnapshot(t *testing.T) {
 	require.True(t, replay.Replayed)
 	for _, snapshot := range replay.Balances {
 		if snapshot.AccountID == merchant.ID {
-			assert.Equal(t, int64(70_000), snapshot.Available, "legacy fallback возвращает текущий баланс")
+			assert.Equal(t, int64(70_000), snapshot.Available, "the legacy fallback returns the current balance")
 		}
 	}
 }
@@ -227,7 +227,7 @@ func TestIntegrationCursorFromAnotherStatement(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pageA, 1)
 
-	// Курсор из выписки другого счета принимается: фильтр по entry_id > cursor.
+	// A cursor from another account statement is accepted: the filter is entry_id > cursor.
 	pageB, _, err := repo.ListEntries(ctx, storage.EntryFilter{AccountID: merchantB.ID, Limit: 10, Cursor: fmt.Sprint(pageA[0].EntryID)})
 	require.NoError(t, err)
 	for _, entry := range pageB {
@@ -252,9 +252,9 @@ func TestIntegrationListEntriesConcurrentWritesCompleteness(t *testing.T) {
 		go func(w int) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
-				// Разносим попытки писателей по времени: цель теста - чередование
-				// коммитов, а не предельная нагрузка на CAS.
-				time.Sleep(time.Duration(rand.IntN(3)) * time.Millisecond) //nolint:gosec // G404: разнесение попыток, не криптография
+				// Spread writer attempts in time: the goal of the test is interleaved
+				// commits, not peak CAS load.
+				time.Sleep(time.Duration(rand.IntN(3)) * time.Millisecond) //nolint:gosec // G404: spreading attempts, not cryptography
 				key := fmt.Sprintf("pag-%d-%d:completed", w, i)
 				_, err := repo.PostTransaction(context.Background(), key, "payment", key, []domain.EntryInput{
 					{AccountID: merchant.ID, Direction: domain.DirectionDebit, Amount: int64(100 + i)},
@@ -273,8 +273,8 @@ func TestIntegrationListEntriesConcurrentWritesCompleteness(t *testing.T) {
 		close(done)
 	}()
 
-	// Читатель следует цепочке курсоров, пока идут записи: пропуск любой
-	// закоммиченной проводки означал бы разрыв порядка id и коммитов.
+	// The reader follows the cursor chain while writes are in flight: skipping any
+	// committed transaction would mean a break between the id order and the commit order.
 	seen := map[int64]struct{}{}
 	cursor := ""
 	finished := false
@@ -296,7 +296,7 @@ func TestIntegrationListEntriesConcurrentWritesCompleteness(t *testing.T) {
 	}
 	close(errCh)
 	for err := range errCh {
-		require.NoError(t, err, "проводка конкурентного писателя")
+		require.NoError(t, err, "transaction of a concurrent writer")
 	}
 
 	var full []storage.EntryView
@@ -310,10 +310,10 @@ func TestIntegrationListEntriesConcurrentWritesCompleteness(t *testing.T) {
 			break
 		}
 	}
-	require.Len(t, full, writers*perWriter, "все конкурентные проводки закоммичены")
+	require.Len(t, full, writers*perWriter, "all concurrent transactions are committed")
 	for _, entry := range full {
 		assert.Contains(t, seen, entry.EntryID,
-			"курсорная пагинация не должна пропускать закоммиченную проводку %d", entry.EntryID)
+			"cursor pagination must not skip a committed transaction %d", entry.EntryID)
 	}
 }
 
@@ -332,30 +332,30 @@ func TestIntegrationListEntriesMerchantScope(t *testing.T) {
 
 	page, cursor, err := repo.ListEntries(ctx, storage.EntryFilter{MerchantRef: "m-a"})
 	require.NoError(t, err)
-	require.Len(t, page, 3, "все записи счетов мерчанта, включая payout")
+	require.Len(t, page, 3, "all records of the merchant accounts, including payout")
 	assert.Empty(t, cursor)
 	for _, entry := range page {
 		assert.Contains(t, []string{merchantA.ID, payoutA.ID}, entry.AccountID,
-			"проводки других счетов и мерчантов не попадают в выписку")
+			"entries of other accounts and merchants do not appear in the statement")
 	}
 
-	// Чужой account_id под фильтром мерчанта отвечает как ненайденный: чужие
-	// счета и их существование не раскрываются.
+	// A foreign account_id under the merchant filter responds as not found: other
+	// accounts and their existence are not disclosed.
 	_, _, err = repo.ListEntries(ctx, storage.EntryFilter{MerchantRef: "m-a", AccountID: merchantB.ID})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, domain.ErrUnknownAccount)
 
-	// Платформенный счет невидим в выписке мерчанта.
+	// A platform account is invisible in the merchant statement.
 	_, _, err = repo.ListEntries(ctx, storage.EntryFilter{MerchantRef: "m-a", AccountID: fee.ID})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, domain.ErrUnknownAccount)
 
-	// account_id без фильтра мерчанта работает как раньше (внутренний вызов).
+	// account_id without the merchant filter works as before (an internal call).
 	page, _, err = repo.ListEntries(ctx, storage.EntryFilter{AccountID: payoutA.ID})
 	require.NoError(t, err)
 	require.Len(t, page, 1)
 
-	// Пустой фильтр и невалидная ссылка отклоняются (fail-closed).
+	// An empty filter and an invalid reference are rejected (fail-closed).
 	_, _, err = repo.ListEntries(ctx, storage.EntryFilter{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, domain.ErrInvalidQuery)
@@ -373,10 +373,10 @@ func TestIntegrationListEntriesPeriod(t *testing.T) {
 
 	postPayment(t, repo, "p-2:completed", "p-2", merchant.ID, fee.ID, 200)
 
-	// Старая проводка пишется напрямую: журнал append-only, created_at не
-	// корректируется UPDATE-ом даже в тесте. Truncate до микросекунд: PG
-	// хранит timestamptz с точностью до микросекунды, иначе сравнение
-	// round-trip нестабильно.
+	// The old transaction is written directly: the journal is append-only, created_at
+	// is not adjusted by an UPDATE even in a test. Truncate to microseconds: PG stores
+	// timestamptz with microsecond precision, otherwise the round-trip comparison
+	// is unstable.
 	old := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
 	txID := uuid.Must(uuid.NewV7()).String()
 	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
@@ -397,7 +397,7 @@ func TestIntegrationListEntriesPeriod(t *testing.T) {
 	assert.Equal(t, "p-1", page[0].RefID)
 	assert.True(t, page[0].CreatedAt.UTC().Equal(old))
 
-	// Границы: from включительно, to исключительно.
+	// Boundaries: from inclusive, to exclusive.
 	atFrom := old
 	page, _, err = repo.ListEntries(ctx, storage.EntryFilter{AccountID: merchant.ID, PeriodFrom: &atFrom})
 	require.NoError(t, err)
@@ -406,12 +406,12 @@ func TestIntegrationListEntriesPeriod(t *testing.T) {
 	atTo := old
 	page, _, err = repo.ListEntries(ctx, storage.EntryFilter{AccountID: merchant.ID, PeriodTo: &atTo})
 	require.NoError(t, err)
-	assert.Empty(t, page, "запись ровно на границе to не входит")
+	assert.Empty(t, page, "an entry exactly at the to boundary is not included")
 
 	justAfter := old.Add(time.Microsecond)
 	page, _, err = repo.ListEntries(ctx, storage.EntryFilter{AccountID: merchant.ID, PeriodTo: &justAfter})
 	require.NoError(t, err)
-	require.Len(t, page, 1, "to исключительно: запись на границе from попадает")
+	require.Len(t, page, 1, "to exclusive: an entry at the from boundary is included")
 
 	_, _, err = repo.ListEntries(ctx, storage.EntryFilter{AccountID: merchant.ID, PeriodFrom: &to, PeriodTo: &from})
 	require.Error(t, err)
@@ -433,10 +433,10 @@ func TestIntegrationListMerchantAccounts(t *testing.T) {
 
 	views, err := repo.ListMerchantAccounts(ctx, "m-1")
 	require.NoError(t, err)
-	require.Len(t, views, 3, "только счета мерчанта: merchant и payout")
-	assert.Equal(t, "BTC", views[0].Asset, "порядок по (asset, type)")
+	require.Len(t, views, 3, "merchant accounts only: merchant and payout")
+	assert.Equal(t, "BTC", views[0].Asset, "ordered by (asset, type)")
 	assert.Equal(t, "merchant", views[0].Type)
-	assert.Zero(t, views[0].Available, "счет без проводок отдается нулевым")
+	assert.Zero(t, views[0].Available, "an account without entries is returned as zero")
 	assert.Equal(t, "USDT", views[1].Asset)
 	assert.Equal(t, "merchant", views[1].Type)
 	assert.Equal(t, int64(60_000), views[1].Available)
@@ -449,13 +449,13 @@ func TestIntegrationListMerchantAccounts(t *testing.T) {
 	require.Len(t, views, 1)
 	assert.Equal(t, int64(5_000), views[0].Available)
 
-	// Мерчант без счетов дает пустой список, не ошибку.
+	// A merchant without accounts yields an empty list, not an error.
 	none, err := repo.ListMerchantAccounts(ctx, "m-none")
 	require.NoError(t, err)
 	assert.Empty(t, none)
 
-	// Счет без балансового ряда (аномалия провижининга) отдается нулями;
-	// точечный GetBalance на такой счет отвечает ненайденным (2.5).
+	// An account without a balance row (a provisioning anomaly) is returned as zeros;
+	// a point GetBalance on such an account responds as not found (2.5).
 	strayRef := "m-stray"
 	stray := storage.Account{
 		ID:          uuid.Must(uuid.NewV7()).String(),

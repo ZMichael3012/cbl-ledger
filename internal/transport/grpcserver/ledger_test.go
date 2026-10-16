@@ -226,7 +226,7 @@ func TestListEntriesValidation(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
 
-	// Нужен account_id или merchant_ref (2.10).
+	// account_id or merchant_ref is required (2.10).
 	_, err = server.ListEntries(ctx, &ledgerv1.ListEntriesRequest{})
 	require.Error(t, err)
 	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
@@ -235,12 +235,12 @@ func TestListEntriesValidation(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
 
-	// Период: невалидная метка и инверсные границы отклоняются до хранилища.
+	// Period: an invalid timestamp and inverted bounds are rejected before the storage.
 	_, err = server.ListEntries(ctx, &ledgerv1.ListEntriesRequest{
 		MerchantRef: "m-1",
 		PeriodFrom:  &timestamppb.Timestamp{Seconds: 253402300800},
 	})
-	require.Error(t, err, "метка за пределами диапазона protobuf")
+	require.Error(t, err, "timestamp outside the protobuf range")
 	assert.Equal(t, grpcmw.KindInvalidArgument, grpcmw.KindOf(err))
 
 	_, err = server.ListEntries(ctx, &ledgerv1.ListEntriesRequest{
