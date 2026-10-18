@@ -143,6 +143,9 @@ func TestPaymentConsumerKafkaFlow(t *testing.T) {
 		Type:           eventsv1.PaymentEventType_PAYMENT_EVENT_TYPE_COMPLETED,
 		ReceivedAmount: &commonv1.Money{MinorUnits: 100_000, Asset: "USDT", Decimals: 2},
 		Fee:            &commonv1.Money{MinorUnits: 2_000, Asset: "USDT", Decimals: 2},
+		GatewayFee:     &commonv1.Money{MinorUnits: 1_200, Asset: "USDT", Decimals: 2},
+		NetworkFee:     &commonv1.Money{MinorUnits: 500, Asset: "USDT", Decimals: 2},
+		FxSpread:       &commonv1.Money{MinorUnits: 300, Asset: "USDT", Decimals: 2},
 	}
 	body, err := proto.Marshal(event)
 	require.NoError(t, err)
@@ -188,6 +191,51 @@ func TestPaymentConsumerKafkaFlow(t *testing.T) {
 	var outboxRows int64
 	require.NoError(t, db.Model(&outbox.Record{}).Count(&outboxRows).Error)
 	assert.Equal(t, int64(1), outboxRows)
+
+	// A repeated deposit arrives as a derived child completed payment (17.10):
+	// it posts its delta through the same consumer with its own idempotency key
+	// and publishes a second ledger.events envelope.
+	const childID = "01a138fd-0000-7000-8000-000000000202"
+	child := &eventsv1.PaymentEvent{
+		PaymentId:      childID,
+		MerchantId:     "m-kafka",
+		Type:           eventsv1.PaymentEventType_PAYMENT_EVENT_TYPE_COMPLETED,
+		ReceivedAmount: &commonv1.Money{MinorUnits: 50_000, Asset: "USDT", Decimals: 2},
+		Fee:            &commonv1.Money{MinorUnits: 500, Asset: "USDT", Decimals: 2},
+		GatewayFee:     &commonv1.Money{MinorUnits: 300, Asset: "USDT", Decimals: 2},
+		NetworkFee:     &commonv1.Money{MinorUnits: 100, Asset: "USDT", Decimals: 2},
+		FxSpread:       &commonv1.Money{MinorUnits: 100, Asset: "USDT", Decimals: 2},
+	}
+	childBody, err := proto.Marshal(child)
+	require.NoError(t, err)
+	childRecord := &kgo.Record{
+		Topic: paymentTopic,
+		Key:   []byte(childID),
+		Value: childBody,
+		Headers: []kgo.RecordHeader{
+			{Key: outbox.HeaderEventID, Value: []byte(uuid.Must(uuid.NewV7()).String())},
+			{Key: outbox.HeaderEventType, Value: []byte("payment.completed")},
+			{Key: outbox.HeaderProducer, Value: []byte("cbl-payment")},
+		},
+	}
+	require.NoError(t, producer.ProduceSync(ctx, childRecord).FirstErr())
+	require.Eventually(t, func() bool {
+		var count int64
+		return db.Model(&storage.Transaction{}).Count(&count).Error == nil && count == 2
+	}, 20*time.Second, 200*time.Millisecond, "the child top-up posting must appear")
+
+	balance, err = repo.GetBalance(ctx, merchantID.String())
+	require.NoError(t, err)
+	assert.Equal(t, int64(147_500), balance.Available, "both deposits net of their fees")
+	feeID, err := domain.DeriveAccountID(domain.PlatformAccountKey(domain.AccountTypeFee, "USDT", 2))
+	require.NoError(t, err)
+	feeBalance, err := repo.GetBalance(ctx, feeID.String())
+	require.NoError(t, err)
+	assert.Equal(t, int64(2_500), feeBalance.Available)
+
+	var finalOutbox int64
+	require.NoError(t, db.Model(&outbox.Record{}).Count(&finalOutbox).Error)
+	assert.Equal(t, int64(2), finalOutbox)
 }
 
 // headerValue returns the value of a Kafka record header.

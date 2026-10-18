@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 	"gorm.io/gorm"
 
+	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
 	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
 
 	"github.com/cbl/cbl-kit/inbox"
@@ -181,6 +183,17 @@ func buildCompletedPosting(event *eventsv1.PaymentEvent) (completedPosting, erro
 	if fee > received.GetMinorUnits() {
 		return completedPosting{}, fmt.Errorf("%w: fee %d exceeds received %d", errInvalidPaymentEvent, fee, received.GetMinorUnits())
 	}
+	// The aggregate fee must equal the provider split total when the split is
+	// present (cf-4.1, 17.10): the fee drives real money, so an inconsistent
+	// split is rejected fail-closed. Without components the fee is accepted
+	// as-is (legacy producers).
+	splitTotal, hasSplit, err := feeSplitTotal(event, asset, received.GetDecimals())
+	if err != nil {
+		return completedPosting{}, err
+	}
+	if hasSplit && splitTotal != fee {
+		return completedPosting{}, fmt.Errorf("%w: fee split total %d does not match fee %d", errInvalidPaymentEvent, splitTotal, fee)
+	}
 	return completedPosting{
 		PaymentID:   parsedPaymentID.String(),
 		MerchantKey: merchantKey,
@@ -189,4 +202,36 @@ func buildCompletedPosting(event *eventsv1.PaymentEvent) (completedPosting, erro
 		Received:    received.GetMinorUnits(),
 		Fee:         fee,
 	}, nil
+}
+
+// feeSplitTotal validates the optional provider fee split (CF-4, 17.10):
+// every non-zero component must be non-negative and carry the received asset
+// and scale, and the sum must not overflow. A nil or zero component means the
+// provider did not report it and is treated as absent; the boolean reports
+// whether any non-zero component is present.
+func feeSplitTotal(event *eventsv1.PaymentEvent, asset string, decimals uint32) (int64, bool, error) {
+	components := []*commonv1.Money{event.GetGatewayFee(), event.GetNetworkFee(), event.GetFxSpread()}
+	var total int64
+	for i, part := range components {
+		if part == nil {
+			continue
+		}
+		if part.GetMinorUnits() < 0 {
+			return 0, false, fmt.Errorf("%w: fee split component %d must not be negative", errInvalidPaymentEvent, i)
+		}
+		if part.GetMinorUnits() == 0 {
+			continue
+		}
+		if part.GetAsset() != asset || part.GetDecimals() != decimals {
+			return 0, false, fmt.Errorf("%w: fee split component %d asset or decimals mismatch", errInvalidPaymentEvent, i)
+		}
+		if part.GetMinorUnits() > math.MaxInt64-total {
+			return 0, false, fmt.Errorf("%w: fee split total overflows", errInvalidPaymentEvent)
+		}
+		total += part.GetMinorUnits()
+	}
+	if total == 0 {
+		return 0, false, nil
+	}
+	return total, true, nil
 }

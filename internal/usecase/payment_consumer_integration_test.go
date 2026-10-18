@@ -208,6 +208,59 @@ func TestIntegrationPaymentCompletedTemplates(t *testing.T) {
 	assert.Equal(t, int64(3), countRows(t, db, &storage.Transaction{}), "rejections and skips do not create postings")
 }
 
+func TestIntegrationPaymentCompletedFeeSplit(t *testing.T) {
+	db := setupPaymentDB(t)
+	processor, repo := setupPaymentProcessor(t, db)
+	ctx := context.Background()
+
+	money := func(units int64) *commonv1.Money {
+		return &commonv1.Money{MinorUnits: units, Asset: "USDT", Decimals: 2}
+	}
+	const parentID = "01a138fd-0000-7000-8000-000000000111"
+	parent := completedEvent(parentID, "m-split", 100_000, money(1_500))
+	parent.GatewayFee = money(1_000)
+	parent.NetworkFee = money(300)
+	parent.FxSpread = money(200)
+	require.NoError(t, processor.Process(ctx, paymentMessage(t, parent, "")))
+
+	merchant, err := repo.GetBalance(ctx, accountID(t, domain.MerchantAccountKey("m-split", "USDT", 2)))
+	require.NoError(t, err)
+	assert.Equal(t, int64(98_500), merchant.Available)
+	fee, err := repo.GetBalance(ctx, accountID(t, domain.PlatformAccountKey(domain.AccountTypeFee, "USDT", 2)))
+	require.NoError(t, err)
+	assert.Equal(t, int64(1_500), fee.Available)
+	clearing, err := repo.GetBalance(ctx, accountID(t, domain.PlatformAccountKey(domain.AccountTypeClearing, "USDT", 2)))
+	require.NoError(t, err)
+	assert.Equal(t, int64(-100_000), clearing.Available, "the transit clearing account goes negative")
+	assert.Equal(t, int64(3), countRows(t, db, &storage.Entry{}), "the split posting has three entries")
+
+	// An inconsistent split is rejected without a posting (I-02).
+	broken := completedEvent("01a138fd-0000-7000-8000-000000000113", "m-split", 10_000, money(1_500))
+	broken.GatewayFee = money(1_000)
+	broken.NetworkFee = money(300)
+	require.Error(t, processor.Process(ctx, paymentMessage(t, broken, "")))
+	assert.Equal(t, int64(1), countRows(t, db, &storage.Transaction{}), "the invalid split created no posting")
+	assert.Equal(t, int64(1), countRows(t, db, &outbox.Record{}), "the invalid split published nothing")
+
+	// A repeated deposit arrives as a derived child completed payment (17.10):
+	// it posts its delta through the same path with its own idempotency key (I-03).
+	child := completedEvent("01a138fd-0000-7000-8000-000000000112", "m-split", 50_000, money(500))
+	child.GatewayFee = money(300)
+	child.NetworkFee = money(100)
+	child.FxSpread = money(100)
+	require.NoError(t, processor.Process(ctx, paymentMessage(t, child, "")))
+
+	merchant, err = repo.GetBalance(ctx, accountID(t, domain.MerchantAccountKey("m-split", "USDT", 2)))
+	require.NoError(t, err)
+	assert.Equal(t, int64(148_000), merchant.Available, "both deposits net of their fees")
+	fee, err = repo.GetBalance(ctx, accountID(t, domain.PlatformAccountKey(domain.AccountTypeFee, "USDT", 2)))
+	require.NoError(t, err)
+	assert.Equal(t, int64(2_000), fee.Available, "the fee account accumulates both fees")
+	assert.Equal(t, int64(2), countRows(t, db, &storage.Transaction{}), "the child is a separate posting")
+	assert.Equal(t, int64(6), countRows(t, db, &storage.Entry{}))
+	assert.Equal(t, int64(2), countRows(t, db, &outbox.Record{}))
+}
+
 func TestIntegrationReserveLifecycleEvents(t *testing.T) {
 	db := setupPaymentDB(t)
 	_, repo := setupPaymentProcessor(t, db)

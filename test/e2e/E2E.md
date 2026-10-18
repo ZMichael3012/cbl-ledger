@@ -79,7 +79,13 @@ Expected key facts checked by the tests:
 - a repeated PostTransaction with the same idempotency key returns the stored
   `balances_after` snapshot;
 - ListEntries paginates with a cursor and returns funding and payments in entry id order;
-- a foreign `merchant_ref` combined with another merchant's `account_id` replies NotFound.
+- a foreign `merchant_ref` combined with another merchant's `account_id` replies NotFound;
+- the payment consumer flow (17.10): a `payment.completed` event with the provider
+  fee split posts Dr clearing / Cr merchant / Cr fee with the aggregate fee equal to
+  the split total, a top-up child payment posts its delta as a second idempotent
+  transaction, and a split inconsistent with the fee is rejected without a posting
+  (`TestPaymentConsumerKafkaFlow` provisions its own testcontainers Kafka and
+  PostgreSQL inside the same run).
 
 ## 5. Mandatory run artifacts
 

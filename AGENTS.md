@@ -21,6 +21,7 @@ Out of scope: other platform services; interaction only through `cbl-protos` con
 - Kafka produces: `ledger.events` (transaction.posted, reserve.created/committed/released;
   envelopes via outbox, key - the first posting in sort order; CBL-003 section 6)
 - Kafka consumes: `payment.events` (payment.completed -> Dr clearing / Cr merchant / Cr fee;
+  the provider fee split components are validated against the aggregate fee, 17.10;
   group `cbl-ledger-payments`, retry topics and DLQ via the kit mechanics)
 - Storage: PostgreSQL ledger (accounts, transactions, entries, balances, reserves,
   reserve_operations, transaction_balances, outbox, inbox)
@@ -96,6 +97,7 @@ consumer lag; dashboards after task 0.7.
 | T-LED-09 | The `ledger.events` partition key is the lexicographically minimal account_id of the posting | stable event partitioning, dedup by event_id in the header | events of one account may land in different partitions (order is not promised); the min key pulls a share of events to platform accounts (clearing/fee) | consumers correlate by `ref_id`/`transaction_id`, not by order; if needed, the key is revisited in CF-2 |
 | T-LED-10 | Property tests without new dependencies: `testing/quick` for the domain, a deterministic generator on `math/rand/v2` for storage | zero dependencies, reproducibility via `PROPERTY_SEED`, a check after every operation | manual generator, no shrinking, invariants duplicate the SQL schema | check independence is confirmed by mutations; failure localization - stage and seed; `pgregory.net/rapid` extension - only on a revision in 14.x |
 | T-LED-11 | Merchant reads (2.10) are filtered by `merchant_ref` in the query instead of a separate token owner: the BFF passes the token subject, the Ledger does not authenticate the caller (KI-ledger-02) | ownership and merchant isolation without cross-service tables; foreign/platform accounts under the filter answer NotFound without revealing existence | protection against `merchant_ref` spoofing appears only with mTLS/authN (0.6); until then the port is not published outside the trusted network | the unfiltered statement and the one by account_id remain internal calls; isolation integration tests are mandatory; access to platform accounts through the merchant filter is impossible |
+| T-LED-12 | The provider fee split (`gateway_fee`/`network_fee`/`fx_spread`, CF-4, 17.10) is evidence, not an accounting dimension: the posting keeps one fee account and the aggregate `fee`; the split is validated fail-closed (non-zero components non-negative, same asset/scale, sum equals `fee`, overflow-safe) and a zero/absent component means the provider did not report it | the posted fee always equals the provider-reported total; no posting scheme change and no migration; the ledger stays independent of provider fee semantics | the split is not booked per component (no per-component fee analytics in the ledger - reporting reads the payment event); a producer without a split falls back to the aggregate (documented legacy path); suspense routing of unmatched deposits stays 17.13 (KI-ledger-10) | the validation cases are pinned by the unit matrix (P-01..P-07) and the integration/e2e tests (I-01..I-03) |
 
 ## 9. Known issues
 
@@ -110,6 +112,7 @@ consumer lag; dashboards after task 0.7.
 | KI-ledger-07 | `transaction_balances` grows about 1:1 to `entries` (a row per affected account), retention and partitioning are not defined | DB growth, more expensive backups; reads by PK are not affected by the growth | partitioning/retention together with `entries` - task 14.2; `created_at` is already written (2.5) | open |
 | KI-ledger-08 | The derivation of `account_id` (chart of accounts UUIDv5) is implemented in the ledger `internal/domain`; consumers (Billing API 7.4, Payout 10.2) will reproduce the algorithm from the golden vectors (CBL-003, section 9) | risk of implementation drift between services | move the derivation into the shared `cbl-kit` library before 7.4/10.2 starts; until then the vectors are mandatory in every consumer's tests | open |
 | KI-ledger-09 | The ledger outbox grows on every mutation (postings, reserves) and is not cleaned: the relay only sets `published_at` | DB and backup growth; the 2.9 measurement did not include outbox row inserts | retention/archival of published rows together with `entries` partitioning - task 14.2; throughput re-measurement there as well | open |
+| KI-ledger-10 | Unmatched deposits (a wrong-asset deposit, a top-up without a txid, a late deposit after expiry; payment side KI-payment-08/10) have no suspense postings: the funds stay at the provider and only payment logs/DLQ reasons mark them | money is not reflected in the ledger until a manual decision; no automated suspense account flow | reconciliation 17.13 classifies them from provider exports and defines the suspense postings; until then the runbook manual investigation applies | open |
 
 ## 10. Task journal
 
@@ -126,6 +129,7 @@ consumer lag; dashboards after task 0.7.
 | CBL-2.8 | 2026-10-14 | done, review closed (property-based invariant tests with mutation check, coverage 87.7%) | `.specs/CBL-2.8-property-tests.md` | 2dba4a5 |
 | CBL-2.10 | 2026-10-15 | done, review closed (BFF statements: ListMerchantAccounts, merchant and period filters for ListEntries, ownership fail-closed; contract cf-3.2) | `.specs/CBL-2.10-ledger-bff-extension.md` | fbe0c45 |
 | CBL-16.5 | 2026-10-16 | done (English comments and documentation across the repository: code, tests, migrations, Dockerfile, load scripts, all ten specs, AGENTS.md, README; e2e runs via `test/e2e/E2E.md` with scenario `E2E_Ledger_ReserveFlow`, `reserve_flow.ps1` and `make smoke` removed; validation run PASS; coverage unchanged, 87.1% unit+integration) | `.specs/CBL-16.5-conventions.md` | this commit |
+| CBL-17.10 (increment 2, ledger) | 2026-10-18 | done, review closed (provider fee split and top-up coverage: `buildCompletedPosting` validates the CF-4 split components fail-closed - non-zero components non-negative, same asset/scale as the received amount, sum equal to the aggregate fee, overflow-safe; absent/zero components keep the legacy aggregate path; the posting scheme is unchanged and a derived top-up child posts its delta as a separate idempotent payment.completed with its own `payment:{id}:completed` key; unit matrix P-01..P-07, integration I-01..I-03 (split posting, rejection without a posting, parent+child balances), the E2E run per test/e2e/E2E.md (targeted compose stand plus the testcontainers consumer flow with the split and the top-up child) PASS (mark `20261018t141304z`); coverage 88.7% unit+integration; go mod tidy leftovers folded in) | `.specs/CBL-17.10-ledger-fee-split.md` | this commit |
 
 ## 11. Runbook
 
@@ -165,6 +169,10 @@ Payment consumer and events (2.7):
    event_id since the CBL-1.3 fix).
 3. Outbox lag: kit relay logs; unpublished rows lie in the `outbox` table
    (retention - KI-ledger-09, 14.2); there is no loss, duplicates are possible (at-least-once).
+4. A rejected fee split (`fee split ...` in the DLQ `x-error`, 17.10): the event
+   components disagree with the aggregate fee (sum mismatch, negative part,
+   foreign asset/scale) - check the payment service emission and the event
+   producer before replay; never patch the posting manually (reversal only, 10.x).
 
 BFF statements (2.10):
 
@@ -177,3 +185,4 @@ BFF statements (2.10):
 4. An empty ListMerchantAccounts list: the merchant has no chart accounts yet (no
    postings and reserves) - not an error; verify the expected `account_id` against the
    golden vectors (KI-ledger-08).
+

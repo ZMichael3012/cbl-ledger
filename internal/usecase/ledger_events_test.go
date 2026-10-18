@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -119,6 +120,83 @@ func completedEvent(paymentID, merchantID string, received int64, fee *commonv1.
 		Fee:            fee,
 		OccurredAt:     timestamppb.New(time.Now().UTC()),
 	}
+}
+
+func TestBuildCompletedPostingFeeSplit(t *testing.T) {
+	t.Parallel()
+	const paymentID = "01a138fd-0000-7000-8000-000000000011"
+	money := func(units int64) *commonv1.Money {
+		return &commonv1.Money{MinorUnits: units, Asset: "USDT", Decimals: 2}
+	}
+	withSplit := func(event *eventsv1.PaymentEvent, gateway, network, fx *commonv1.Money) *eventsv1.PaymentEvent {
+		event.GatewayFee = gateway
+		event.NetworkFee = network
+		event.FxSpread = fx
+		return event
+	}
+
+	t.Run("consistent split", func(t *testing.T) {
+		t.Parallel()
+		event := withSplit(completedEvent(paymentID, "m-1", 100_000, money(1_500)), money(1_000), money(300), money(200))
+		posting, err := buildCompletedPosting(event)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1_500), posting.Fee)
+	})
+	t.Run("no split is accepted as before", func(t *testing.T) {
+		t.Parallel()
+		posting, err := buildCompletedPosting(completedEvent(paymentID, "m-1", 100_000, money(1_500)))
+		require.NoError(t, err)
+		assert.Equal(t, int64(1_500), posting.Fee)
+	})
+	t.Run("sum mismatch is invalid", func(t *testing.T) {
+		t.Parallel()
+		event := withSplit(completedEvent(paymentID, "m-1", 100_000, money(1_500)), money(1_000), money(300), nil)
+		_, err := buildCompletedPosting(event)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errInvalidPaymentEvent)
+		assert.Contains(t, err.Error(), "fee split")
+	})
+	t.Run("negative component is invalid", func(t *testing.T) {
+		t.Parallel()
+		event := withSplit(completedEvent(paymentID, "m-1", 100_000, money(1_500)), money(1_600), money(-100), nil)
+		_, err := buildCompletedPosting(event)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errInvalidPaymentEvent)
+	})
+	t.Run("foreign component asset is invalid", func(t *testing.T) {
+		t.Parallel()
+		event := withSplit(completedEvent(paymentID, "m-1", 100_000, money(1_500)), money(1_400),
+			&commonv1.Money{MinorUnits: 100, Asset: "BTC", Decimals: 8}, nil)
+		_, err := buildCompletedPosting(event)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errInvalidPaymentEvent)
+	})
+	t.Run("split without fee is invalid", func(t *testing.T) {
+		t.Parallel()
+		event := withSplit(completedEvent(paymentID, "m-1", 100_000, nil), money(100), nil, nil)
+		_, err := buildCompletedPosting(event)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errInvalidPaymentEvent)
+	})
+	t.Run("zero component is absent even with a foreign scale", func(t *testing.T) {
+		t.Parallel()
+		event := withSplit(completedEvent(paymentID, "m-1", 100_000, money(1_500)), money(1_500),
+			&commonv1.Money{MinorUnits: 0, Asset: "BTC", Decimals: 8}, nil)
+		posting, err := buildCompletedPosting(event)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1_500), posting.Fee)
+	})
+	t.Run("sum overflow is invalid", func(t *testing.T) {
+		t.Parallel()
+		// The wrapped sum equals the fee exactly, so only the explicit overflow
+		// guard rejects the event.
+		event := withSplit(completedEvent(paymentID, "m-1", 100, money(100)),
+			money(math.MaxInt64), money(math.MaxInt64), money(102))
+		_, err := buildCompletedPosting(event)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errInvalidPaymentEvent)
+		assert.Contains(t, err.Error(), "overflow")
+	})
 }
 
 func TestBuildCompletedPosting(t *testing.T) {
