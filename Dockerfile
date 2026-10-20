@@ -1,17 +1,17 @@
-# Build context: the services/ directory (needed for replace to ../cbl-kit and ../cbl-protos).
-# Build: docker build -f cbl-ledger/Dockerfile -t cbl/ledger:dev .
+# Build context: the repository root (CBL-0.9). The cbl-kit and cbl-protos
+# modules are fetched from the GitHub origin; no sibling checkouts are needed.
 FROM golang:1.26-alpine AS build
+RUN apk add --no-cache git
+RUN git config --global url."https://github.com/ZMichael3012/".insteadOf "https://github.com/cbl/"
+ENV GOPRIVATE=github.com/cbl/*
 WORKDIR /src
-COPY cbl-kit/ /src/cbl-kit/
-COPY cbl-protos/ /src/cbl-protos/
-COPY cbl-ledger/ /src/cbl-ledger/
-WORKDIR /src/cbl-ledger
+COPY go.mod go.sum ./
 RUN go mod download
+COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/ledger ./cmd/ledger
-
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 COPY --from=build /out/ledger /app/ledger
-COPY --from=build /src/cbl-ledger/migrations /app/migrations
+COPY --from=build /src/migrations /app/migrations
 EXPOSE 8040 9040 9240
 ENTRYPOINT ["/app/ledger"]
