@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"github.com/cbl/cbl-kit/outbox"
+	"github.com/ZMichael3012/cbl-kit/outbox"
 
 	"github.com/cbl/cbl-ledger/internal/domain"
 	"github.com/cbl/cbl-ledger/internal/storage"

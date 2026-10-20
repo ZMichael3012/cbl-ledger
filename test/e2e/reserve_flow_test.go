@@ -25,8 +25,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
-	ledgerv1 "github.com/cbl/cbl-protos/gen/go/billing/ledger/v1"
+	commonv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/common/v1"
+	ledgerv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/ledger/v1"
 
 	"github.com/cbl/cbl-ledger/internal/domain"
 	"github.com/cbl/cbl-ledger/internal/storage"
